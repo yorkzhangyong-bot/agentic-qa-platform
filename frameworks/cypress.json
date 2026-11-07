@@ -1,0 +1,13 @@
+{
+  "name": "cypress",
+  "install": ["npm ci"],
+  "run": "npx cypress run --reporter junit --reporter-options mochaFile=results/[hash].xml",
+  "env": {},
+  "report_glob": "results/*.xml",
+  "test_glob": "cypress/e2e/**/*.cy.{js,ts}",
+  "default_test_dir": "cypress/e2e",
+  "locator_priority": ["data-cy", "data-testid", "role", "text"],
+  "forbidden_paths": ["src/", "cypress/support/commands.*"],
+  "agents_dir": "agents/cypress",
+  "mcp": "browser"
+}

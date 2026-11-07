@@ -1,0 +1,16 @@
+# Copy to .github/workflows/test-and-heal.yml in your repository.
+name: Test & heal
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  qa:
+    uses: yorkzhangyong-bot/agentic-qa-platform/.github/workflows/test-and-heal.yml@main
+    permissions: { contents: write, pull-requests: write }
+    with:
+      framework: playwright # playwright | cypress | selenium
+      test_dir: tests
+      app_url: ${{ vars.APP_URL }}
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

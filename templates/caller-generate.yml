@@ -1,0 +1,20 @@
+# Copy to .github/workflows/generate-tests.yml in your repository.
+name: Generate tests
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      spec_path: { description: "Path to a spec markdown file in this repo", required: false }
+jobs:
+  generate:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'ready-for-tests'
+    uses: yorkzhangyong-bot/agentic-qa-platform/.github/workflows/generate-tests.yml@main
+    permissions: { contents: write, pull-requests: write, issues: read }
+    with:
+      framework: playwright # playwright | cypress | selenium
+      app_url: ${{ vars.APP_URL }}
+      issue_number: ${{ github.event.issue.number }}
+      spec_path: ${{ inputs.spec_path }}
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

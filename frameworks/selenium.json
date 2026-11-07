@@ -1,0 +1,13 @@
+{
+  "name": "selenium",
+  "install": ["mvn -B -q dependency:resolve"],
+  "run": "mvn -B test",
+  "env": {},
+  "report_glob": "target/surefire-reports/*.xml",
+  "test_glob": "src/test/java/**/*Test.java",
+  "default_test_dir": "src/test/java",
+  "locator_priority": ["data-testid", "id", "name", "css"],
+  "forbidden_paths": ["src/main/"],
+  "agents_dir": "agents/selenium",
+  "mcp": "browser"
+}

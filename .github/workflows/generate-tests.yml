@@ -1,0 +1,327 @@
+name: generate-tests
+
+# Reusable workflow: turn a spec (markdown file, GitHub issue or Jira ticket) into tests. The planner agent
+# writes results/plan.md, the generator agent implements it against the live app, the tests run,
+# anti-cheat.sh checks the diff, and a pull request is opened on auto-generate/<run_id>.
+
+on:
+  workflow_call:
+    inputs:
+      framework:
+        description: Framework config to use (playwright, cypress, selenium, i.e. frameworks/<framework>.json).
+        type: string
+        required: true
+      test_dir:
+        description: Directory for the generated tests, relative to the repository root. Empty means the framework's default_test_dir.
+        type: string
+        default: ""
+      app_url:
+        description: Base URL of a running instance of the app, explored by the agents through the browser MCP server.
+        type: string
+        default: ""
+      spec_path:
+        description: Markdown spec in the repository (highest priority).
+        type: string
+        default: ""
+      issue_number:
+        description: GitHub issue whose title and body are the spec.
+        type: string
+        default: ""
+      jira_key:
+        description: Jira issue key, e.g. QA-123.
+        type: string
+        default: ""
+      jira_base_url:
+        description: Jira site, e.g. https://your-company.atlassian.net (required with jira_key).
+        type: string
+        default: ""
+      jira_email:
+        description: Jira Cloud account email for basic auth with JIRA_TOKEN. Leave empty to send JIRA_TOKEN as a Bearer token.
+        type: string
+        default: ""
+      node_version:
+        description: Node.js version (always installed, because Claude Code and the browser MCP server need it).
+        type: string
+        default: "20"
+      java_version:
+        description: Java version (installed when the framework runs Maven or Gradle).
+        type: string
+        default: "17"
+      max_turns:
+        description: Maximum agentic turns for each claude -p call.
+        type: number
+        default: 30
+      platform_ref:
+        description: Optional branch, tag or SHA of agentic-qa-platform to take scripts, agents and configs from. Empty uses the commit of this workflow (job.workflow_sha).
+        type: string
+        default: ""
+    secrets:
+      ANTHROPIC_API_KEY:
+        description: Anthropic API key for Claude Code.
+        required: true
+      JIRA_TOKEN:
+        description: Jira API token (required with jira_key).
+        required: false
+      PLATFORM_TOKEN:
+        description: Optional token with read access to agentic-qa-platform (only needed if it is private).
+        required: false
+    outputs:
+      pr_url:
+        description: URL of the auto-generate pull request, if one was opened.
+        value: ${{ jobs.generate.outputs.pr_url }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  config:
+    name: Framework config
+    uses: ./.github/workflows/_select-framework.yml
+    with:
+      framework: ${{ inputs.framework }}
+      platform_ref: ${{ inputs.platform_ref }}
+    secrets:
+      PLATFORM_TOKEN: ${{ secrets.PLATFORM_TOKEN }}
+
+  generate:
+    name: Generate ${{ inputs.framework }} tests
+    needs: config
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: read
+    outputs:
+      pr_url: ${{ steps.pr.outputs.pull-request-url }}
+    env:
+      FRAMEWORK: ${{ inputs.framework }}
+      TEST_DIR: ${{ inputs.test_dir || needs.config.outputs.default_test_dir }}
+      APP_URL: ${{ inputs.app_url }}
+      MAX_TURNS: ${{ inputs.max_turns }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Checkout agentic-qa-platform
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ inputs.platform_ref || job.workflow_sha }}
+          token: ${{ secrets.PLATFORM_TOKEN || github.token }}
+          path: .agentic-qa
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: ${{ needs.config.outputs.runtime == 'node' && 'npm' || '' }}
+
+      - name: Set up Java
+        if: needs.config.outputs.runtime == 'java'
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java_version }}
+          cache: ${{ hashFiles('pom.xml') != '' && 'maven' || '' }}
+
+      - name: Install dependencies
+        env:
+          INSTALL_SCRIPT: ${{ needs.config.outputs.install_script }}
+        run: |
+          while IFS= read -r cmd; do
+            [ -n "$cmd" ] || continue
+            echo "::group::$cmd"
+            bash -c "$cmd" < /dev/null
+            echo "::endgroup::"
+          done <<< "$INSTALL_SCRIPT"
+
+      - name: Fetch spec
+        id: spec
+        env:
+          SPEC_PATH: ${{ inputs.spec_path }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          JIRA_KEY: ${{ inputs.jira_key }}
+          JIRA_BASE_URL: ${{ inputs.jira_base_url }}
+          JIRA_EMAIL: ${{ inputs.jira_email }}
+          JIRA_TOKEN: ${{ secrets.JIRA_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash .agentic-qa/scripts/fetch-spec.sh
+          title="$(head -n 1 spec.md | sed -e 's/^#*[[:space:]]*//' | cut -c1-80)"
+          echo "title=${title:-specification}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Claude Code
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          claude --version
+
+      - name: Stage agents, MCP config and shared rules
+        env:
+          AGENTS_DIR: ${{ needs.config.outputs.agents_dir }}
+        run: |
+          mkdir -p .claude/agents .git/info
+          cp .agentic-qa/agents/common/* .claude/agents/
+          cp .agentic-qa/"$AGENTS_DIR"/* .claude/agents/
+          cp .agentic-qa/.mcp.json .
+          exclude=.git/info/exclude
+          if [ ! -f CLAUDE.md ]; then
+            cp .agentic-qa/CLAUDE.md CLAUDE.md
+            echo "/CLAUDE.md" >> "$exclude"
+          elif [ ! -f .claude/CLAUDE.md ]; then
+            cp .agentic-qa/CLAUDE.md .claude/CLAUDE.md   # also loaded as project memory
+            echo "/.claude/CLAUDE.md" >> "$exclude"
+          else
+            echo "::warning::CLAUDE.md and .claude/CLAUDE.md already exist; the platform's shared rules were not installed."
+          fi
+          # Keep platform files and run artefacts out of git status, anti-cheat and the pull request.
+          for f in .agentic-qa/agents/common/* .agentic-qa/"$AGENTS_DIR"/*; do
+            echo "/.claude/agents/$(basename "$f")" >> "$exclude"
+          done
+          printf '%s\n' /.agentic-qa/ /.mcp.json /results/ /spec.md /PR_BODY.md /.playwright-mcp/ \
+            node_modules/ test-results/ playwright-report/ blob-report/ \
+            cypress/screenshots/ cypress/videos/ cypress/downloads/ target/ >> "$exclude"
+          npx -y @playwright/mcp@latest --version   # warm the npx cache so the MCP server starts fast
+          ls -1 .claude/agents
+
+      - name: Record base commits
+        run: |
+          echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "PLATFORM_SHA=$(git -C .agentic-qa rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Plan and generate (Claude Code)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MCP_TIMEOUT: "60000"
+        run: |
+          claude -p "Use the planner agent on spec.md, then the generator agent to implement the plan in $TEST_DIR. Framework config: .agentic-qa/frameworks/$FRAMEWORK.json. App URL: ${APP_URL:-not provided}." \
+            --allowedTools "Read,Edit,Write,Bash,Glob,Grep,mcp__browser__*" \
+            --mcp-config .mcp.json \
+            --strict-mcp-config \
+            --permission-mode dontAsk \
+            --max-turns "$MAX_TURNS"
+
+      - name: Run tests
+        id: run
+        continue-on-error: true
+        env:
+          RUN_CMD: ${{ needs.config.outputs.run }}
+          FRAMEWORK_ENV: ${{ needs.config.outputs.env }}
+          REPORT_GLOB: ${{ needs.config.outputs.report_glob }}
+        run: |
+          shopt -s globstar nullglob
+          for f in $REPORT_GLOB; do rm -f -- "$f"; done   # drop reports left over from the generator's own runs
+          mkdir -p results
+          env_json="${FRAMEWORK_ENV:-}"
+          [ -n "$env_json" ] || env_json='{}'
+          eval "$(jq -r 'to_entries[] | "export \(.key)=\(.value | tostring | @sh)"' <<< "$env_json")"
+          if [ -n "$APP_URL" ]; then export BASE_URL="$APP_URL" CYPRESS_BASE_URL="$APP_URL"; fi
+          echo "+ $RUN_CMD"
+          bash -c "$RUN_CMD"
+
+      - name: Parse JUnit report
+        env:
+          REPORT_GLOB: ${{ needs.config.outputs.report_glob }}
+        run: bash .agentic-qa/scripts/parse-report.sh "$REPORT_GLOB"
+
+      - name: Anti-cheat
+        env:
+          FORBIDDEN_PATHS: ${{ needs.config.outputs.forbidden_paths_csv }}
+        run: |
+          set -o pipefail
+          if [ "$(git -C .agentic-qa rev-parse HEAD)" != "$PLATFORM_SHA" ] || [ -n "$(git -C .agentic-qa status --porcelain)" ]; then
+            echo "::error::Files in .agentic-qa/ were modified during the agent run, so anti-cheat.sh cannot be trusted."
+            exit 1
+          fi
+          bash .agentic-qa/scripts/anti-cheat.sh "$FORBIDDEN_PATHS" "$BASE_SHA" | tee results/anti-cheat.txt
+
+      - name: Detect test changes
+        id: changes
+        run: |
+          changes="$(git status --porcelain --untracked-files=all -- . ':(exclude).mcp.json' ':(exclude)CLAUDE.md' ':(exclude).claude')"
+          if [ -n "$changes" ]; then
+            echo "$changes"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::The generator did not create or change any test files; see the 'Plan and generate' step."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      - name: Write PR description (pr-writer agent)
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TEST_OUTCOME: ${{ steps.run.outcome }}
+        run: |
+          fingerprint() { { git diff HEAD --binary; git ls-files --others --exclude-standard -z | xargs -0 -r sha256sum; } | sha256sum; }
+          before="$(fingerprint)"
+          claude -p "Use the pr-writer agent to write PR_BODY.md for this auto-generate run. Framework: $FRAMEWORK. Test dir: $TEST_DIR. Test run after generation: $TEST_OUTCOME. Read spec.md, results/plan.md, results/generate-report.json, results/failures.json, results/anti-cheat.txt and the git diff." \
+            --allowedTools "Read,Edit,Write,Bash,Glob,Grep" \
+            --strict-mcp-config \
+            --permission-mode dontAsk \
+            --max-turns "$MAX_TURNS"
+          if [ "$(fingerprint)" != "$before" ]; then
+            echo "::error::The pr-writer agent changed files after anti-cheat ran. Refusing to open the pull request."
+            exit 1
+          fi
+          test -s PR_BODY.md || { echo "::error::The pr-writer agent did not write PR_BODY.md."; exit 1; }
+
+      - name: Restore platform-staged files
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          # Staging may have overwritten files the repository tracks; they must not end up in the pull request.
+          for p in .mcp.json CLAUDE.md .claude; do
+            if git ls-files --error-unmatch -- "$p" > /dev/null 2>&1; then git checkout -- "$p"; fi
+          done
+          git status --short
+
+      - name: Open pull request
+        id: pr
+        if: steps.changes.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          branch: auto-generate/${{ github.run_id }}
+          base: ${{ github.head_ref || github.ref_name }}
+          title: "Auto-generate: tests for ${{ steps.spec.outputs.title }}"
+          body-path: PR_BODY.md
+          labels: auto-generate
+          commit-message: "test: add generated ${{ inputs.framework }} tests (run ${{ github.run_id }})"
+          draft: ${{ steps.run.outcome == 'failure' }}
+          delete-branch: true
+
+      - name: Job summary
+        if: always()
+        env:
+          PR_URL: ${{ steps.pr.outputs.pull-request-url }}
+          TEST_OUTCOME: ${{ steps.run.outcome }}
+        run: |
+          {
+            echo "## Auto-generate (${FRAMEWORK})"
+            echo
+            if [ -f spec.md ]; then echo "Spec: $(head -n 1 spec.md)"; fi
+            if [ -f results/plan.md ]; then echo; echo "Scenarios planned: $(grep -cE '^### [0-9]+\.' results/plan.md || true)"; fi
+            echo
+            echo "Test run after generation: ${TEST_OUTCOME:-not run}"
+            if [ -f results/failures.json ]; then echo; echo "Failing tests: $(jq length results/failures.json)"; fi
+            if [ -n "$PR_URL" ]; then echo; echo "Pull request: $PR_URL"; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload agent results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: auto-generate-results
+          path: |
+            results/
+            spec.md
+            PR_BODY.md
+          if-no-files-found: ignore
+          retention-days: 14
