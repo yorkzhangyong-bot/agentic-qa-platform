@@ -45,7 +45,9 @@ check every selector against the running app.
   existing commands. Never depend on a previous `it`. Use unique test data per test.
 - **Navigation.** `cy.visit('/path')` with relative paths. The base URL comes from `baseUrl` or
   `CYPRESS_BASE_URL`; never hard-code hosts.
-- **Traceability.** Name each test after its plan scenario, e.g. `it('1. applies a valid coupon', …)`.
+- **Traceability.** Name each test after its plan scenario, e.g. `it('1. applies a valid coupon', …)`. If the
+  scenario carries Spec Kit ids (`FR-###`, `SC-###`), use the plan's suggested test name, which ends with them, and add
+  a doc comment, e.g. `/** Covers FR-003, SC-001 */` above `it('3. rejects an expired coupon [FR-003]', …)`.
 
 Example:
 
@@ -110,4 +112,4 @@ describe('Checkout coupons', () => {
 - Never touch `forbidden_paths` (`src/`, `cypress/support/commands.*`), `cypress.config.*` or `package.json`.
 - Don't add `.skip`, `.only`, `xit`, `xdescribe`, retries or `cy.wait(<number>)`. `scripts/anti-cheat.sh` fails the
   run if you do.
-- Follow the shared platform rules (`.agentic-qa/CLAUDE.md`, appended to these instructions).
+- Follow the shared platform rules in `AGENT-RULES.md`, which are loaded together with these instructions.

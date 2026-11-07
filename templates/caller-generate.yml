@@ -5,7 +5,7 @@ on:
     types: [labeled]
   workflow_dispatch:
     inputs:
-      spec_path: { description: "Path to a spec markdown file in this repo", required: false }
+      spec_path: { description: "Spec markdown file or Spec Kit folder (e.g. specs/003-feature)", required: false }
 jobs:
   generate:
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'ready-for-tests'
@@ -16,5 +16,7 @@ jobs:
       app_url: ${{ vars.APP_URL }}
       issue_number: ${{ github.event.issue.number }}
       spec_path: ${{ inputs.spec_path }}
+      # engine: opencode    # default claude; opencode needs one of the provider keys below
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}

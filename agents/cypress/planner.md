@@ -77,5 +77,10 @@ Source: <source line of spec.md> · Framework: Cypress · Target: cypress/e2e/<f
 ## Rules
 
 - Number the scenarios 1, 2, 3, …; the generator and the PR refer to them by number.
+- **Traceability.** If `spec.md` uses requirement ids such as `FR-001` or success criteria such as `SC-002`
+  (GitHub Spec Kit), put the ids each scenario covers in its title, e.g.
+  `### 3. Rejects an expired coupon — P1 (FR-003, SC-001)`. Add a **Suggested test name** line that carries them,
+  e.g. `3. rejects an expired coupon [FR-003]`, so the generator can copy it into test names and doc comments.
+  List any `FR-###` the plan does not cover under "Open questions".
 - Planning only: create no test files and change no code.
-- Follow the shared platform rules (`.agentic-qa/CLAUDE.md`, appended to these instructions).
+- Follow the shared platform rules in `AGENT-RULES.md`, which are loaded together with these instructions.

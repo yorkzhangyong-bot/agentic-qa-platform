@@ -1,7 +1,7 @@
 name: ci
 
-# CI for this repository: lint the scripts and workflows, validate the configs and agent definitions, and run the
-# fixture tests for scripts/anti-cheat.sh and scripts/parse-report.sh.
+# CI for this repository: lint the scripts and workflows, validate the configs, AGENT-RULES.md and the agent
+# definitions, and run the fixture tests (anti-cheat.sh, parse-report.sh, fetch-spec.sh, stage-agents.sh, run-agent.sh).
 
 on:
   push:
@@ -54,9 +54,15 @@ jobs:
             done
             echo "ok  $f"
           done
-          jq -e '.mcpServers | length > 0' .mcp.json > /dev/null && echo "ok  .mcp.json"
-          jq -e '(.permissions.allow | length > 0) and (.permissions.deny | length > 0)' settings/claude-settings.json > /dev/null \
-            && echo "ok  settings/claude-settings.json"
+          check() {  # check <file> <jq filter>: fail the step unless the filter is true
+            jq -e "$2" "$1" > /dev/null || { echo "::error file=$1::failed check: $2"; exit 1; }
+            echo "ok  $1"
+          }
+          check settings/claude-mcp.json '.mcpServers | length > 0'
+          check settings/claude-settings.json '(.permissions.allow | length > 0) and (.permissions.deny | length > 0)'
+          check settings/opencode-permissions.json '.permission.bash and .permission.edit and .permission.webfetch'
+          [ -s AGENT-RULES.md ] || { echo "::error::AGENT-RULES.md is missing or empty"; exit 1; }
+          echo "ok  AGENT-RULES.md"
 
       - name: Validate agent front matter
         run: |
@@ -110,5 +116,5 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: anti-cheat.sh and parse-report.sh fixtures
+      - name: Script fixture tests
         run: bash tests/run-tests.sh

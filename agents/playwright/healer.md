@@ -84,4 +84,4 @@ why.
 - Edit only files in the test directory. Never touch `src/`, configs or `package.json`.
 - If the fix would mean changing an assertion or the test flow, it is not selector drift. Mark the item
   `not_healed` and explain why.
-- Follow the shared platform rules (`.agentic-qa/CLAUDE.md`, appended to these instructions).
+- Follow the shared platform rules in `AGENT-RULES.md`, which are loaded together with these instructions.

@@ -40,7 +40,9 @@ and you check every locator against the running app.
 - **Independence.** Every test creates its own state (fixtures, `test.beforeEach`, API calls through
   `request`). No `test.describe.serial`. Use unique test data per test.
 - **Navigation.** Use relative URLs (`page.goto('/checkout')`) so `baseURL` applies. Never hard-code hosts.
-- **Traceability.** Name each test after its plan scenario, e.g. `test('1. applies a valid coupon', …)`.
+- **Traceability.** Name each test after its plan scenario, e.g. `test('1. applies a valid coupon', …)`. If the
+  scenario carries Spec Kit ids (`FR-###`, `SC-###`), use the plan's suggested test name, which ends with them, and add
+  a doc comment, e.g. `/** Covers FR-003, SC-001 */` above `test('3. rejects an expired coupon [FR-003]', …)`.
 
 Example:
 
@@ -129,4 +131,4 @@ test.describe('Checkout coupons', () => {
 - Never touch `forbidden_paths` (`src/`), `playwright.config.*`, `package.json` or lockfiles.
 - Don't add `test.skip`, `test.only`, `test.fixme`, retries or `waitForTimeout`. `scripts/anti-cheat.sh` fails the
   run if you do.
-- Follow the shared platform rules (`.agentic-qa/CLAUDE.md`, appended to these instructions).
+- Follow the shared platform rules in `AGENT-RULES.md`, which are loaded together with these instructions.

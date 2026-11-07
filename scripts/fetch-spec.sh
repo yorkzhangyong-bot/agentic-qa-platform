@@ -2,7 +2,10 @@
 # fetch-spec.sh — write the feature specification for the planner agent to spec.md.
 #
 # Inputs (environment variables). The first source that is set wins:
-#   SPEC_PATH      path to an existing markdown file in the repository
+#   SPEC_PATH      a markdown file in the repository, copied as-is; or a directory (e.g. a GitHub Spec Kit feature
+#                  folder such as specs/003-feature/), whose files are concatenated in this order, each under a
+#                  "## <file>" header: spec.md, plan.md, data-model.md, contracts/*.md|*.yaml|*.yml (sorted),
+#                  quickstart.md, tasks.md. A directory with none of them is an error; other files are ignored.
 #   ISSUE_NUMBER   GitHub issue number, read with `gh issue view <n> --json title,body`
 #                  (needs GH_TOKEN with issues:read; uses $GITHUB_REPOSITORY when set, else the current repo)
 #   JIRA_KEY       Jira issue key (e.g. QA-123), read from $JIRA_BASE_URL/rest/api/3/issue/<key>
@@ -11,7 +14,7 @@
 #     JIRA_EMAIL     Jira Cloud account email; enables basic auth. Leave it empty to send JIRA_TOKEN as a
 #                    Bearer token (e.g. a Jira Data Center personal access token).
 #
-# Output: spec.md in the current directory (override with SPEC_OUT).
+# Output: spec.md in the current directory (override with SPEC_OUT). Its first line is a "# <title>" heading.
 # Exits 1 with a clear message if no source is set or fetching fails.
 set -euo pipefail
 
@@ -25,7 +28,46 @@ issue="${ISSUE_NUMBER:-}"
 issue="${issue#\#}"
 jira_key="${JIRA_KEY:-}"
 
-if [ -n "$spec_path" ]; then
+if [ -n "$spec_path" ] && [ -d "$spec_path" ]; then
+  dir="${spec_path%/}"
+  parts=()
+  for name in spec.md plan.md data-model.md; do
+    if [ -f "$dir/$name" ]; then parts+=("$name"); fi
+  done
+  if [ -d "$dir/contracts" ]; then
+    while IFS= read -r contract; do
+      parts+=("contracts/$(basename "$contract")")
+    done < <(find "$dir/contracts" -maxdepth 1 -type f \( -name '*.md' -o -name '*.yaml' -o -name '*.yml' \) | LC_ALL=C sort)
+  fi
+  for name in quickstart.md tasks.md; do
+    if [ -f "$dir/$name" ]; then parts+=("$name"); fi
+  done
+  [ "${#parts[@]}" -gt 0 ] || die "SPEC_PATH '$spec_path' is a directory but contains none of spec.md, plan.md, data-model.md, contracts/*.md|*.yaml|*.yml, quickstart.md or tasks.md."
+  title=""
+  if [ -f "$dir/spec.md" ]; then title="$(sed -n 's/^#[[:space:]]\{1,\}//p' "$dir/spec.md" | head -n 1)"; fi
+  tmp_out="$(mktemp)"
+  {
+    printf '# %s\n\n' "${title:-$(basename "$dir")}"
+    printf '> Source: Spec Kit folder %s/ (%s)\n' "$dir" "$(printf '%s, ' "${parts[@]}" | sed 's/, $//')"
+    for part in "${parts[@]}"; do
+      printf '\n## %s\n\n' "$part"
+      case "$part" in
+        *.yaml|*.yml)
+          printf '```yaml\n'
+          cat "$dir/$part"
+          printf '\n```\n'
+          ;;
+        *)
+          cat "$dir/$part"
+          printf '\n'
+          ;;
+      esac
+    done
+  } > "$tmp_out"
+  mv "$tmp_out" "$out"
+  log "wrote $out from Spec Kit folder $dir (${#parts[@]} files)"
+
+elif [ -n "$spec_path" ]; then
   [ -f "$spec_path" ] || die "SPEC_PATH '$spec_path' does not exist (relative paths resolve from $(pwd))."
   if [ "$spec_path" -ef "$out" ]; then
     log "SPEC_PATH already is $out"
@@ -156,7 +198,7 @@ PY
   log "wrote $out from Jira issue $jira_key"
 
 else
-  die "no spec source provided. Set SPEC_PATH (markdown file), ISSUE_NUMBER (GitHub issue) or JIRA_KEY (Jira issue)."
+  die "no spec source provided. Set SPEC_PATH (markdown file or Spec Kit folder), ISSUE_NUMBER (GitHub issue) or JIRA_KEY (Jira issue)."
 fi
 
 [ -s "$out" ] || die "$out is empty."

@@ -1,8 +1,9 @@
 name: generate-tests
 
-# Reusable workflow: turn a spec (markdown file, GitHub issue or Jira ticket) into tests. The planner agent writes
-# results/plan.md, the generator agent implements it against the live app, the tests run, anti-cheat.sh checks the
-# diff, and the pr-writer agent describes the result in a pull request on auto-generate/<run_id>.
+# Reusable workflow: turn a spec (markdown file, Spec Kit folder, GitHub issue or Jira ticket) into tests. The planner
+# agent writes results/plan.md, the generator agent implements it against the live app, the tests run, anti-cheat.sh
+# checks the diff, and the pr-writer agent describes the result in a pull request on auto-generate/<run_id>.
+# Agents run on the selected engine (Claude Code or OpenCode) via scripts/stage-agents.sh and scripts/run-agent.sh.
 
 on:
   workflow_call:
@@ -19,8 +20,12 @@ on:
         description: Base URL of a running, disposable test instance of the app (never production), explored by the agents through the browser MCP server.
         type: string
         default: ""
+      engine:
+        description: Agent engine, claude or opencode.
+        type: string
+        default: claude
       spec_path:
-        description: Markdown spec in the repository (highest priority).
+        description: Markdown spec file or Spec Kit feature folder (e.g. specs/003-feature) in the repository. Highest priority.
         type: string
         default: ""
       issue_number:
@@ -40,7 +45,7 @@ on:
         type: string
         default: ""
       node_version:
-        description: Node.js version (always installed, because Claude Code and the browser MCP server need it).
+        description: Node.js version (always installed, because the agent engines and the browser MCP server need it).
         type: string
         default: "20"
       java_version:
@@ -48,17 +53,25 @@ on:
         type: string
         default: "17"
       plan_max_turns:
-        description: Maximum agentic turns for the planner agent.
+        description: Turn budget for the planner agent (claude --max-turns; emulated with a time limit on opencode).
         type: number
         default: 20
       generate_max_turns:
-        description: Maximum agentic turns for the generator agent.
+        description: Turn budget for the generator agent (claude --max-turns; emulated with a time limit on opencode).
         type: number
         default: 80
       claude_code_version:
-        description: Version of @anthropic-ai/claude-code to install.
+        description: Version of @anthropic-ai/claude-code to install when engine is claude.
         type: string
         default: "2.1.283"
+      opencode_version:
+        description: Version of opencode-ai to install when engine is opencode.
+        type: string
+        default: "1.19.5"
+      opencode_model:
+        description: Model for the OpenCode agents, as provider/model.
+        type: string
+        default: deepseek/deepseek-chat
       playwright_mcp_version:
         description: Version of @playwright/mcp to run as the browser MCP server.
         type: string
@@ -69,8 +82,17 @@ on:
         default: ""
     secrets:
       ANTHROPIC_API_KEY:
-        description: Dedicated, low-quota Anthropic API key for Claude Code.
-        required: true
+        description: Dedicated, low-quota Anthropic API key. Required when engine is claude.
+        required: false
+      DEEPSEEK_API_KEY:
+        description: DeepSeek API key for OpenCode. With engine opencode, set at least one provider key.
+        required: false
+      OPENROUTER_API_KEY:
+        description: OpenRouter API key for OpenCode. With engine opencode, set at least one provider key.
+        required: false
+      OPENAI_API_KEY:
+        description: OpenAI API key for OpenCode. With engine opencode, set at least one provider key.
+        required: false
       JIRA_TOKEN:
         description: Jira API token (required with jira_key).
         required: false
@@ -100,6 +122,7 @@ jobs:
     uses: ./.github/workflows/_select-framework.yml
     with:
       framework: ${{ inputs.framework }}
+      engine: ${{ inputs.engine }}
       platform_ref: ${{ inputs.platform_ref }}
     secrets:
       PLATFORM_TOKEN: ${{ secrets.PLATFORM_TOKEN }}
@@ -108,7 +131,7 @@ jobs:
     name: Generate ${{ inputs.framework }} tests
     needs: config
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     permissions:
       contents: write
       pull-requests: write
@@ -116,17 +139,48 @@ jobs:
     outputs:
       pr_url: ${{ steps.pr.outputs.pull-request-url }}
     env:
+      ENGINE: ${{ inputs.engine }}
       FRAMEWORK: ${{ inputs.framework }}
       TEST_DIR: ${{ inputs.test_dir || needs.config.outputs.default_test_dir }}
       APP_URL: ${{ inputs.app_url }}
+      PLATFORM_DIR: .agentic-qa
       MCP_SERVER: ${{ needs.config.outputs.mcp }}
       PLAYWRIGHT_MCP_VERSION: ${{ inputs.playwright_mcp_version }}
-      PR_WRITER_MAX_TURNS: "20"
+      OPENCODE_MODEL: ${{ inputs.opencode_model }}
       MCP_TIMEOUT: "60000"
-      # Tools allowed without prompting. Bash is deliberately absent: the staged .claude/settings.json limits it to
-      # the test runners and read-only commands. Agent (current Claude Code) / Task (older releases) = sub-agents.
-      ALLOWED_TOOLS: Read,Edit,Write,Glob,Grep,Agent,Task
     steps:
+      - name: Check engine credentials
+        env:
+          HAS_ANTHROPIC: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+          HAS_DEEPSEEK: ${{ secrets.DEEPSEEK_API_KEY != '' }}
+          HAS_OPENROUTER: ${{ secrets.OPENROUTER_API_KEY != '' }}
+          HAS_OPENAI: ${{ secrets.OPENAI_API_KEY != '' }}
+        run: |
+          case "$ENGINE" in
+            claude)
+              [ "$HAS_ANTHROPIC" = true ] || { echo "::error::engine claude needs the ANTHROPIC_API_KEY secret."; exit 1; }
+              ;;
+            opencode)
+              if [ "$HAS_DEEPSEEK" != true ] && [ "$HAS_OPENROUTER" != true ] && [ "$HAS_OPENAI" != true ]; then
+                echo "::error::engine opencode needs at least one of the DEEPSEEK_API_KEY, OPENROUTER_API_KEY or OPENAI_API_KEY secrets."
+                exit 1
+              fi
+              provider="${OPENCODE_MODEL%%/*}"
+              case "$provider" in
+                deepseek) has="$HAS_DEEPSEEK"; key=DEEPSEEK_API_KEY ;;
+                openrouter) has="$HAS_OPENROUTER"; key=OPENROUTER_API_KEY ;;
+                openai) has="$HAS_OPENAI"; key=OPENAI_API_KEY ;;
+                *) has=unknown; key="" ;;
+              esac
+              if [ "$has" = false ]; then echo "::warning::opencode_model '$OPENCODE_MODEL' uses provider '$provider', but $key is not set."; fi
+              ;;
+            *)
+              echo "::error::Unknown engine '$ENGINE'. Use claude or opencode."
+              exit 1
+              ;;
+          esac
+          echo "Agent engine: $ENGINE"
+
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
@@ -177,79 +231,60 @@ jobs:
           JIRA_TOKEN: ${{ secrets.JIRA_TOKEN }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          bash .agentic-qa/scripts/fetch-spec.sh
+          bash "$PLATFORM_DIR/scripts/fetch-spec.sh"
           title="$(head -n 1 spec.md | sed -e 's/^#*[[:space:]]*//' | cut -c1-80)"
           echo "title=${title:-specification}" >> "$GITHUB_OUTPUT"
 
-      - name: Install Claude Code
+      - name: Install agent engine
         env:
           CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
+          OPENCODE_VERSION: ${{ inputs.opencode_version }}
         run: |
-          npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
-          claude --version
+          if [ "$ENGINE" = opencode ]; then
+            npm install -g "opencode-ai@${OPENCODE_VERSION}"
+            opencode --version
+          else
+            npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+            claude --version
+          fi
 
-      - name: Stage agents, MCP config and Claude settings
-        env:
-          AGENTS_DIR: ${{ needs.config.outputs.agents_dir }}
-        run: |
-          mkdir -p .claude/agents .git/info
-          cp .agentic-qa/agents/common/* .agentic-qa/"$AGENTS_DIR"/* .claude/agents/
-          cp .agentic-qa/settings/claude-settings.json .claude/settings.json
-          # Pin the MCP server version in the staged copy of .mcp.json.
-          jq --arg pkg "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" \
-            '.mcpServers |= map_values(if .args then .args |= map(if startswith("@playwright/mcp@") then $pkg else . end) else . end)' \
-            .agentic-qa/.mcp.json > .mcp.json
-          # Keep platform files and run artefacts out of git status, anti-cheat and the pull request.
-          exclude=.git/info/exclude
-          for f in .agentic-qa/agents/common/* .agentic-qa/"$AGENTS_DIR"/*; do
-            echo "/.claude/agents/$(basename "$f")" >> "$exclude"
-          done
-          printf '%s\n' /.claude/settings.json /.agentic-qa/ /.mcp.json /results/ /spec.md /PR_BODY.md /.playwright-mcp/ \
-            node_modules/ test-results/ playwright-report/ blob-report/ \
-            cypress/screenshots/ cypress/videos/ cypress/downloads/ target/ >> "$exclude"
-          npx -y "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" --version   # warm the npx cache so the MCP server starts fast
-          ls -1 .claude/agents
+      - name: Stage agents and engine config
+        run: bash "$PLATFORM_DIR/scripts/stage-agents.sh"
 
       - name: Record base commits
         run: |
           echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          echo "PLATFORM_SHA=$(git -C .agentic-qa rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "PLATFORM_SHA=$(git -C "$PLATFORM_DIR" rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Plan (planner agent)
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ inputs.engine == 'claude' && secrets.ANTHROPIC_API_KEY || '' }}
+          DEEPSEEK_API_KEY: ${{ inputs.engine == 'opencode' && secrets.DEEPSEEK_API_KEY || '' }}
+          OPENROUTER_API_KEY: ${{ inputs.engine == 'opencode' && secrets.OPENROUTER_API_KEY || '' }}
+          OPENAI_API_KEY: ${{ inputs.engine == 'opencode' && secrets.OPENAI_API_KEY || '' }}
+          AGENT: planner
           MAX_TURNS: ${{ inputs.plan_max_turns }}
-        run: |
-          status=0
-          claude -p "Read spec.md and write results/plan.md as described in your instructions. Test dir: $TEST_DIR. Framework config: .agentic-qa/frameworks/$FRAMEWORK.json. App URL: ${APP_URL:-not provided}." \
-            --agent planner \
-            --append-system-prompt-file .agentic-qa/CLAUDE.md \
-            --allowedTools "$ALLOWED_TOOLS,mcp__${MCP_SERVER}__*" \
-            --mcp-config .mcp.json \
-            --strict-mcp-config \
-            --permission-mode dontAsk \
-            --max-turns "$MAX_TURNS" || status=$?
-          if [ ! -s results/plan.md ]; then
-            echo "::error::The planner agent did not write results/plan.md (claude exit code $status)."
-            exit 1
-          fi
-          [ "$status" -eq 0 ] || echo "::warning::claude exited with code $status (e.g. the turn limit); using the plan it wrote."
+          EXPECTED_OUTPUT: results/plan.md
+          PROMPT: >-
+            Read spec.md and write results/plan.md as described in your instructions. Test dir: ${{ env.TEST_DIR }}.
+            Framework config: .agentic-qa/frameworks/${{ inputs.framework }}.json. App URL: ${{ inputs.app_url || 'not provided' }}.
+        run: bash "$PLATFORM_DIR/scripts/run-agent.sh"
 
       - name: Generate tests (generator agent)
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ inputs.engine == 'claude' && secrets.ANTHROPIC_API_KEY || '' }}
+          DEEPSEEK_API_KEY: ${{ inputs.engine == 'opencode' && secrets.DEEPSEEK_API_KEY || '' }}
+          OPENROUTER_API_KEY: ${{ inputs.engine == 'opencode' && secrets.OPENROUTER_API_KEY || '' }}
+          OPENAI_API_KEY: ${{ inputs.engine == 'opencode' && secrets.OPENAI_API_KEY || '' }}
+          AGENT: generator
           MAX_TURNS: ${{ inputs.generate_max_turns }}
+          PROMPT: >-
+            Implement the scenarios in results/plan.md as tests in ${{ env.TEST_DIR }} and write results/generate-report.json
+            as described in your instructions. Framework config: .agentic-qa/frameworks/${{ inputs.framework }}.json.
+            App URL: ${{ inputs.app_url || 'not provided' }}.
         run: |
-          status=0
-          claude -p "Implement the scenarios in results/plan.md as tests in $TEST_DIR and write results/generate-report.json as described in your instructions. Framework config: .agentic-qa/frameworks/$FRAMEWORK.json. App URL: ${APP_URL:-not provided}." \
-            --agent generator \
-            --append-system-prompt-file .agentic-qa/CLAUDE.md \
-            --allowedTools "$ALLOWED_TOOLS,mcp__${MCP_SERVER}__*" \
-            --mcp-config .mcp.json \
-            --strict-mcp-config \
-            --permission-mode dontAsk \
-            --max-turns "$MAX_TURNS" || status=$?
-          [ "$status" -eq 0 ] || echo "::warning::claude exited with code $status (e.g. the turn limit); checking what the generator produced."
+          # No EXPECTED_OUTPUT: a missing report is only a warning, the diff is the real evidence.
+          bash "$PLATFORM_DIR/scripts/run-agent.sh" || echo "::warning::The generator stopped early (exit code $?); checking what it produced."
           if [ ! -s results/generate-report.json ]; then
             echo "::warning::The generator agent did not write results/generate-report.json; the PR description will rely on the diff."
           fi
@@ -275,23 +310,24 @@ jobs:
       - name: Parse JUnit report
         env:
           REPORT_GLOB: ${{ needs.config.outputs.report_glob }}
-        run: bash .agentic-qa/scripts/parse-report.sh "$REPORT_GLOB"
+        run: bash "$PLATFORM_DIR/scripts/parse-report.sh" "$REPORT_GLOB"
 
       - name: Anti-cheat
         env:
           FORBIDDEN_PATHS: ${{ needs.config.outputs.forbidden_paths_csv }}
         run: |
           set -o pipefail
-          if [ "$(git -C .agentic-qa rev-parse HEAD)" != "$PLATFORM_SHA" ] || [ -n "$(git -C .agentic-qa status --porcelain)" ]; then
+          if [ "$(git -C "$PLATFORM_DIR" rev-parse HEAD)" != "$PLATFORM_SHA" ] || [ -n "$(git -C "$PLATFORM_DIR" status --porcelain)" ]; then
             echo "::error::Files in .agentic-qa/ were modified during the agent run, so anti-cheat.sh cannot be trusted."
             exit 1
           fi
-          bash .agentic-qa/scripts/anti-cheat.sh "$FORBIDDEN_PATHS" "$BASE_SHA" | tee results/anti-cheat.txt
+          bash "$PLATFORM_DIR/scripts/anti-cheat.sh" "$FORBIDDEN_PATHS" "$BASE_SHA" | tee results/anti-cheat.txt
 
       - name: Detect test changes
         id: changes
         run: |
-          changes="$(git status --porcelain --untracked-files=all -- . ':(exclude).mcp.json' ':(exclude).claude')"
+          changes="$(git status --porcelain --untracked-files=all -- . ':(exclude).mcp.json' ':(exclude).claude' \
+            ':(exclude).opencode' ':(exclude)AGENTS.md' ':(exclude)opencode.json')"
           if [ -n "$changes" ]; then
             echo "$changes"
             echo "changed=true" >> "$GITHUB_OUTPUT"
@@ -304,30 +340,32 @@ jobs:
       - name: Write PR description (pr-writer agent)
         if: steps.changes.outputs.changed == 'true'
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          TEST_OUTCOME: ${{ steps.run.outcome }}
+          ANTHROPIC_API_KEY: ${{ inputs.engine == 'claude' && secrets.ANTHROPIC_API_KEY || '' }}
+          DEEPSEEK_API_KEY: ${{ inputs.engine == 'opencode' && secrets.DEEPSEEK_API_KEY || '' }}
+          OPENROUTER_API_KEY: ${{ inputs.engine == 'opencode' && secrets.OPENROUTER_API_KEY || '' }}
+          OPENAI_API_KEY: ${{ inputs.engine == 'opencode' && secrets.OPENAI_API_KEY || '' }}
+          AGENT: pr-writer
+          MAX_TURNS: "20"
+          EXPECTED_OUTPUT: PR_BODY.md
+          PROMPT: >-
+            Write PR_BODY.md for this auto-generate run as described in your instructions. Framework: ${{ inputs.framework }}.
+            Test dir: ${{ env.TEST_DIR }}. Test run after generation: ${{ steps.run.outcome }}. Read spec.md, results/plan.md,
+            results/generate-report.json, results/failures.json, results/anti-cheat.txt and the git diff.
         run: |
           fingerprint() { { git diff HEAD --binary; git ls-files --others --exclude-standard -z | xargs -0 -r sha256sum; } | sha256sum; }
           before="$(fingerprint)"
-          status=0
-          claude -p "Write PR_BODY.md for this auto-generate run as described in your instructions. Framework: $FRAMEWORK. Test dir: $TEST_DIR. Test run after generation: $TEST_OUTCOME. Read spec.md, results/plan.md, results/generate-report.json, results/failures.json, results/anti-cheat.txt and the git diff." \
-            --agent pr-writer \
-            --append-system-prompt-file .agentic-qa/CLAUDE.md \
-            --allowedTools "$ALLOWED_TOOLS" \
-            --strict-mcp-config \
-            --permission-mode dontAsk \
-            --max-turns "$PR_WRITER_MAX_TURNS" || status=$?
+          bash "$PLATFORM_DIR/scripts/run-agent.sh"
           if [ "$(fingerprint)" != "$before" ]; then
             echo "::error::The pr-writer agent changed files after anti-cheat ran. Refusing to open the pull request."
             exit 1
           fi
-          test -s PR_BODY.md || { echo "::error::The pr-writer agent did not write PR_BODY.md (claude exit code $status)."; exit 1; }
 
       - name: Restore platform-staged files
         if: steps.changes.outputs.changed == 'true'
         run: |
           # Staging may have overwritten files the repository tracks; they must not end up in the pull request.
-          for p in .mcp.json .claude/settings.json .claude/agents; do
+          # `.opencode` covers the staged .opencode/agents/.
+          for p in .mcp.json .claude/settings.json .claude/agents .opencode AGENTS.md opencode.json; do
             if git ls-files --error-unmatch -- "$p" > /dev/null 2>&1; then git checkout -- "$p"; fi
           done
           git status --short
@@ -353,7 +391,7 @@ jobs:
           TEST_OUTCOME: ${{ steps.run.outcome }}
         run: |
           {
-            echo "## Auto-generate (${FRAMEWORK})"
+            echo "## Auto-generate (${FRAMEWORK}, engine ${ENGINE})"
             echo
             if [ -f spec.md ]; then echo "Spec: $(head -n 1 spec.md)"; fi
             if [ -f results/plan.md ]; then echo; echo "Scenarios planned: $(grep -cE '^### [0-9]+\.' results/plan.md || true)"; fi

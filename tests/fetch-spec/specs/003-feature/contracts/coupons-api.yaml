@@ -1,0 +1,14 @@
+# Coupon API contract
+openapi: 3.0.3
+info:
+  title: Coupons
+  version: 1.0.0
+paths:
+  /api/coupons/apply:
+    post:
+      summary: Apply a coupon to the current cart
+      responses:
+        "200":
+          description: Coupon applied
+        "410":
+          description: Coupon expired

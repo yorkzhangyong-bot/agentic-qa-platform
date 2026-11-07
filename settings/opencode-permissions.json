@@ -1,0 +1,34 @@
+{
+  "permission": {
+    "edit": {
+      "*": "deny",
+      "{TEST_DIR}/**": "allow",
+      "results/**": "allow",
+      "PR_BODY.md": "allow"
+    },
+    "bash": {
+      "*": "deny",
+      "npx playwright test*": "allow",
+      "npx playwright install*": "allow",
+      "npx cypress run*": "allow",
+      "mvn*": "allow",
+      "pytest*": "allow",
+      "git status*": "allow",
+      "git diff*": "allow",
+      "git log*": "allow",
+      "ls*": "allow",
+      "cat*": "allow",
+      "mkdir*": "allow",
+      "curl*": "deny",
+      "wget*": "deny",
+      "git push*": "deny",
+      "git config*": "deny",
+      "env*": "deny",
+      "printenv*": "deny",
+      "echo $ANTHROPIC*": "deny",
+      "nc*": "deny",
+      "ssh*": "deny"
+    },
+    "webfetch": "deny"
+  }
+}

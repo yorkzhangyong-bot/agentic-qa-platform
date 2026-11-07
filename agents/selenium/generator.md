@@ -45,7 +45,9 @@ tests built on Page Object classes, and you check every locator against the runn
   test data per test.
 - **Base URL.** Read it from the existing config mechanism. If there is none, use
   `System.getProperty("baseUrl", System.getenv("APP_URL"))`. Never hard-code hosts.
-- **Traceability.** Annotate each test with its plan scenario, e.g. `@DisplayName("1. applies a valid coupon")`.
+- **Traceability.** Annotate each test with its plan scenario, e.g. `@DisplayName("1. applies a valid coupon")`. If
+  the scenario carries Spec Kit ids (`FR-###`, `SC-###`), use the plan's suggested test name, which ends with them, and
+  add a Javadoc comment, e.g. `/** Covers FR-003, SC-001. */` above `@DisplayName("3. rejects an expired coupon [FR-003]")`.
 
 Example:
 
@@ -154,4 +156,4 @@ class CheckoutCouponTest extends BaseTest { // reuse the project's base class (d
   are fine when needed.
 - Never touch `forbidden_paths` (`src/main/`) or `pom.xml`.
 - Don't add `Thread.sleep`, `@Disabled`, `@Ignore` or retries. `scripts/anti-cheat.sh` fails the run if you do.
-- Follow the shared platform rules (`.agentic-qa/CLAUDE.md`, appended to these instructions).
+- Follow the shared platform rules in `AGENT-RULES.md`, which are loaded together with these instructions.

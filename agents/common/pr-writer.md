@@ -72,4 +72,4 @@ Use this structure:
 - Keep each log excerpt to 15 lines or fewer, and the whole body under 60,000 characters.
 - No secrets, tokens or environment-variable values.
 - Write only `PR_BODY.md`. Never edit tests, application code or result files.
-- Follow the shared platform rules (`.agentic-qa/CLAUDE.md`, appended to these instructions).
+- Follow the shared platform rules in `AGENT-RULES.md`, which are loaded together with these instructions.
