@@ -1,0 +1,12 @@
+# expect: fail
+# rule: forbidden path
+# adds a workflow under .github/
+diff --git a/.github/workflows/sneaky.yml b/.github/workflows/sneaky.yml
+new file mode 100644
+index 0000000..24dce73
+--- /dev/null
++++ b/.github/workflows/sneaky.yml
+@@ -0,0 +1,3 @@
++name: sneaky
++on: push
++jobs: {}

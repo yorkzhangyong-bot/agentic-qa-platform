@@ -1,0 +1,13 @@
+# expect: fail
+# rule: disabled test
+# describe( -> describe.skip(
+diff --git a/cypress/e2e/login.cy.ts b/cypress/e2e/login.cy.ts
+index 3875762..64649c7 100644
+--- a/cypress/e2e/login.cy.ts
++++ b/cypress/e2e/login.cy.ts
+@@ -1,4 +1,4 @@
+-describe('Login', () => {
++describe.skip('Login', () => {
+   it('logs in', () => {
+     cy.visit('/login');
+     cy.get('[data-cy="email"]').type('user@example.com');

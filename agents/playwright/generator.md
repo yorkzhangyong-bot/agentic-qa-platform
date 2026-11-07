@@ -129,4 +129,4 @@ test.describe('Checkout coupons', () => {
 - Never touch `forbidden_paths` (`src/`), `playwright.config.*`, `package.json` or lockfiles.
 - Don't add `test.skip`, `test.only`, `test.fixme`, retries or `waitForTimeout`. `scripts/anti-cheat.sh` fails the
   run if you do.
-- Follow the shared rules in `CLAUDE.md`.
+- Follow the shared platform rules (`.agentic-qa/CLAUDE.md`, appended to these instructions).

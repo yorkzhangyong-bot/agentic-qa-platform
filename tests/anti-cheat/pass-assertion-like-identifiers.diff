@@ -1,0 +1,12 @@
+# expect: pass
+# removes identifiers named assertionTimeout / assertiveTone, which are not assertions
+diff --git a/tests/helpers.ts b/tests/helpers.ts
+index f22437d..6f7141b 100644
+--- a/tests/helpers.ts
++++ b/tests/helpers.ts
+@@ -1,5 +1,3 @@
+-export const assertionTimeout = 5000;
+-export const assertiveTone = 'polite';
+ 
+ export function formatPrice(cents: number): string {
+   return `$${(cents / 100).toFixed(2)}`;

@@ -1,0 +1,15 @@
+# expect: fail
+# rule: fixed sleep
+# adds TimeUnit.SECONDS.sleep(1)
+diff --git a/src/test/java/com/acme/LoginTest.java b/src/test/java/com/acme/LoginTest.java
+index 50795ef..909dbf5 100644
+--- a/src/test/java/com/acme/LoginTest.java
++++ b/src/test/java/com/acme/LoginTest.java
+@@ -18,6 +18,7 @@ class LoginTest extends BaseTest {
+         driver.findElement(By.id("submit")).click();
+         new WebDriverWait(driver, Duration.ofSeconds(10))
+             .until(ExpectedConditions.visibilityOfElementLocated(By.id("welcome")));
++        TimeUnit.SECONDS.sleep(1);
+         assertEquals("Welcome back", driver.findElement(By.id("welcome")).getText());
+     }
+ }

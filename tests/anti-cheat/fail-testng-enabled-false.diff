@@ -1,0 +1,16 @@
+# expect: fail
+# rule: disabled test
+# @Test -> @Test(enabled = false)
+diff --git a/src/test/java/com/acme/LoginTest.java b/src/test/java/com/acme/LoginTest.java
+index 50795ef..ef3a459 100644
+--- a/src/test/java/com/acme/LoginTest.java
++++ b/src/test/java/com/acme/LoginTest.java
+@@ -11,7 +11,7 @@ import org.openqa.selenium.support.ui.WebDriverWait;
+ 
+ class LoginTest extends BaseTest {
+ 
+-    @Test
++    @Test(enabled = false)
+     void logsIn() {
+         driver.get(baseUrl + "/login");
+         driver.findElement(By.id("email")).sendKeys("user@example.com");

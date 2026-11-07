@@ -154,4 +154,4 @@ class CheckoutCouponTest extends BaseTest { // reuse the project's base class (d
   are fine when needed.
 - Never touch `forbidden_paths` (`src/main/`) or `pom.xml`.
 - Don't add `Thread.sleep`, `@Disabled`, `@Ignore` or retries. `scripts/anti-cheat.sh` fails the run if you do.
-- Follow the shared rules in `CLAUDE.md`.
+- Follow the shared platform rules (`.agentic-qa/CLAUDE.md`, appended to these instructions).

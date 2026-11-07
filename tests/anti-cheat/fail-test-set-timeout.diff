@@ -1,0 +1,15 @@
+# expect: fail
+# rule: long timeout
+# adds test.setTimeout(2 * 60 * 1000)
+diff --git a/tests/checkout.spec.ts b/tests/checkout.spec.ts
+index c761cb9..b2101fc 100644
+--- a/tests/checkout.spec.ts
++++ b/tests/checkout.spec.ts
+@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
+ 
+ test.describe('Checkout', () => {
+   test('applies a coupon', async ({ page }) => {
++    test.setTimeout(2 * 60 * 1000);
+     await page.goto('/checkout');
+     await page.getByTestId('coupon-input').fill('SAVE10');
+     await page.getByTestId('apply-coupon').click();

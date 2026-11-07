@@ -1,0 +1,15 @@
+# expect: fail
+# rule: test config
+# adds test.describe.configure({ retries: 2 })
+diff --git a/tests/checkout.spec.ts b/tests/checkout.spec.ts
+index c761cb9..ca4cf1d 100644
+--- a/tests/checkout.spec.ts
++++ b/tests/checkout.spec.ts
+@@ -1,6 +1,7 @@
+ import { test, expect } from '@playwright/test';
+ 
+ test.describe('Checkout', () => {
++  test.describe.configure({ retries: 2 });
+   test('applies a coupon', async ({ page }) => {
+     await page.goto('/checkout');
+     await page.getByTestId('coupon-input').fill('SAVE10');

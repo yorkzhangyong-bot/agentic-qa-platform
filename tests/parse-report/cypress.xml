@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="Mocha Tests" time="6.5" tests="2" failures="1">
+  <testsuite name="Root Suite" timestamp="2026-01-01T12:00:00" tests="0" file="cypress/e2e/login.cy.ts" time="0.0" failures="0">
+  </testsuite>
+  <testsuite name="Login" timestamp="2026-01-01T12:00:00" tests="2" time="6.4" failures="1">
+    <testcase name="Login logs in" time="4.1" classname="logs in">
+      <failure message="Timed out retrying after 4000ms: Expected to find element: `[data-cy=&quot;submit&quot;]`, but never found it." type="AssertionError"><![CDATA[AssertionError: Timed out retrying after 4000ms: Expected to find element: `[data-cy="submit"]`, but never found it.
+    at Context.eval (webpack://app/./cypress/e2e/login.cy.ts:5:8)]]></failure>
+    </testcase>
+    <testcase name="Login shows the form" time="2.3" classname="shows the form">
+    </testcase>
+  </testsuite>
+</testsuites>

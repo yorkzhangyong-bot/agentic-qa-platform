@@ -1,0 +1,15 @@
+# expect: fail
+# rule: fixed sleep
+# adds cy.wait(2000)
+diff --git a/cypress/e2e/login.cy.ts b/cypress/e2e/login.cy.ts
+index 3875762..83c2a89 100644
+--- a/cypress/e2e/login.cy.ts
++++ b/cypress/e2e/login.cy.ts
+@@ -1,6 +1,7 @@
+ describe('Login', () => {
+   it('logs in', () => {
+     cy.visit('/login');
++    cy.wait(2000);
+     cy.get('[data-cy="email"]').type('user@example.com');
+     cy.get('[data-cy="submit"]').click();
+     cy.get('[data-cy="welcome"]').should('have.text', 'Welcome back');

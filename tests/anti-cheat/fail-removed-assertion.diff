@@ -1,0 +1,14 @@
+# expect: fail
+# rule: removed assertion
+# deletes an expect() line
+diff --git a/tests/checkout.spec.ts b/tests/checkout.spec.ts
+index c761cb9..bddd9a8 100644
+--- a/tests/checkout.spec.ts
++++ b/tests/checkout.spec.ts
+@@ -7,6 +7,5 @@ test.describe('Checkout', () => {
+     await page.getByTestId('apply-coupon').click();
+     await expect(page.getByTestId('total')).toHaveText('$9.00');
+     await expect(page.getByRole('status')).toBeVisible({ timeout: 10000 });
+-    expect(await page.title()).toBe('Checkout');
+   });
+ });

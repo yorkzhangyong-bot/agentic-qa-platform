@@ -1,8 +1,8 @@
 name: generate-tests
 
-# Reusable workflow: turn a spec (markdown file, GitHub issue or Jira ticket) into tests. The planner agent
-# writes results/plan.md, the generator agent implements it against the live app, the tests run,
-# anti-cheat.sh checks the diff, and a pull request is opened on auto-generate/<run_id>.
+# Reusable workflow: turn a spec (markdown file, GitHub issue or Jira ticket) into tests. The planner agent writes
+# results/plan.md, the generator agent implements it against the live app, the tests run, anti-cheat.sh checks the
+# diff, and the pr-writer agent describes the result in a pull request on auto-generate/<run_id>.
 
 on:
   workflow_call:
@@ -16,7 +16,7 @@ on:
         type: string
         default: ""
       app_url:
-        description: Base URL of a running instance of the app, explored by the agents through the browser MCP server.
+        description: Base URL of a running, disposable test instance of the app (never production), explored by the agents through the browser MCP server.
         type: string
         default: ""
       spec_path:
@@ -47,17 +47,29 @@ on:
         description: Java version (installed when the framework runs Maven or Gradle).
         type: string
         default: "17"
-      max_turns:
-        description: Maximum agentic turns for each claude -p call.
+      plan_max_turns:
+        description: Maximum agentic turns for the planner agent.
         type: number
-        default: 30
+        default: 20
+      generate_max_turns:
+        description: Maximum agentic turns for the generator agent.
+        type: number
+        default: 80
+      claude_code_version:
+        description: Version of @anthropic-ai/claude-code to install.
+        type: string
+        default: "2.1.283"
+      playwright_mcp_version:
+        description: Version of @playwright/mcp to run as the browser MCP server.
+        type: string
+        default: "0.0.84"
       platform_ref:
         description: Optional branch, tag or SHA of agentic-qa-platform to take scripts, agents and configs from. Empty uses the commit of this workflow (job.workflow_sha).
         type: string
         default: ""
     secrets:
       ANTHROPIC_API_KEY:
-        description: Anthropic API key for Claude Code.
+        description: Dedicated, low-quota Anthropic API key for Claude Code.
         required: true
       JIRA_TOKEN:
         description: Jira API token (required with jira_key).
@@ -72,6 +84,11 @@ on:
 
 permissions:
   contents: read
+
+# One run per caller workflow and ref at a time. Later runs wait; a generation in progress is never cancelled.
+concurrency:
+  group: agentic-qa-generate-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 defaults:
   run:
@@ -102,7 +119,13 @@ jobs:
       FRAMEWORK: ${{ inputs.framework }}
       TEST_DIR: ${{ inputs.test_dir || needs.config.outputs.default_test_dir }}
       APP_URL: ${{ inputs.app_url }}
-      MAX_TURNS: ${{ inputs.max_turns }}
+      MCP_SERVER: ${{ needs.config.outputs.mcp }}
+      PLAYWRIGHT_MCP_VERSION: ${{ inputs.playwright_mcp_version }}
+      PR_WRITER_MAX_TURNS: "20"
+      MCP_TIMEOUT: "60000"
+      # Tools allowed without prompting. Bash is deliberately absent: the staged .claude/settings.json limits it to
+      # the test runners and read-only commands. Agent (current Claude Code) / Task (older releases) = sub-agents.
+      ALLOWED_TOOLS: Read,Edit,Write,Glob,Grep,Agent,Task
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -159,36 +182,32 @@ jobs:
           echo "title=${title:-specification}" >> "$GITHUB_OUTPUT"
 
       - name: Install Claude Code
+        env:
+          CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
         run: |
-          npm install -g @anthropic-ai/claude-code
+          npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
           claude --version
 
-      - name: Stage agents, MCP config and shared rules
+      - name: Stage agents, MCP config and Claude settings
         env:
           AGENTS_DIR: ${{ needs.config.outputs.agents_dir }}
         run: |
           mkdir -p .claude/agents .git/info
-          cp .agentic-qa/agents/common/* .claude/agents/
-          cp .agentic-qa/"$AGENTS_DIR"/* .claude/agents/
-          cp .agentic-qa/.mcp.json .
-          exclude=.git/info/exclude
-          if [ ! -f CLAUDE.md ]; then
-            cp .agentic-qa/CLAUDE.md CLAUDE.md
-            echo "/CLAUDE.md" >> "$exclude"
-          elif [ ! -f .claude/CLAUDE.md ]; then
-            cp .agentic-qa/CLAUDE.md .claude/CLAUDE.md   # also loaded as project memory
-            echo "/.claude/CLAUDE.md" >> "$exclude"
-          else
-            echo "::warning::CLAUDE.md and .claude/CLAUDE.md already exist; the platform's shared rules were not installed."
-          fi
+          cp .agentic-qa/agents/common/* .agentic-qa/"$AGENTS_DIR"/* .claude/agents/
+          cp .agentic-qa/settings/claude-settings.json .claude/settings.json
+          # Pin the MCP server version in the staged copy of .mcp.json.
+          jq --arg pkg "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" \
+            '.mcpServers |= map_values(if .args then .args |= map(if startswith("@playwright/mcp@") then $pkg else . end) else . end)' \
+            .agentic-qa/.mcp.json > .mcp.json
           # Keep platform files and run artefacts out of git status, anti-cheat and the pull request.
+          exclude=.git/info/exclude
           for f in .agentic-qa/agents/common/* .agentic-qa/"$AGENTS_DIR"/*; do
             echo "/.claude/agents/$(basename "$f")" >> "$exclude"
           done
-          printf '%s\n' /.agentic-qa/ /.mcp.json /results/ /spec.md /PR_BODY.md /.playwright-mcp/ \
+          printf '%s\n' /.claude/settings.json /.agentic-qa/ /.mcp.json /results/ /spec.md /PR_BODY.md /.playwright-mcp/ \
             node_modules/ test-results/ playwright-report/ blob-report/ \
             cypress/screenshots/ cypress/videos/ cypress/downloads/ target/ >> "$exclude"
-          npx -y @playwright/mcp@latest --version   # warm the npx cache so the MCP server starts fast
+          npx -y "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" --version   # warm the npx cache so the MCP server starts fast
           ls -1 .claude/agents
 
       - name: Record base commits
@@ -196,17 +215,44 @@ jobs:
           echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "PLATFORM_SHA=$(git -C .agentic-qa rev-parse HEAD)" >> "$GITHUB_ENV"
 
-      - name: Plan and generate (Claude Code)
+      - name: Plan (planner agent)
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          MCP_TIMEOUT: "60000"
+          MAX_TURNS: ${{ inputs.plan_max_turns }}
         run: |
-          claude -p "Use the planner agent on spec.md, then the generator agent to implement the plan in $TEST_DIR. Framework config: .agentic-qa/frameworks/$FRAMEWORK.json. App URL: ${APP_URL:-not provided}." \
-            --allowedTools "Read,Edit,Write,Bash,Glob,Grep,mcp__browser__*" \
+          status=0
+          claude -p "Read spec.md and write results/plan.md as described in your instructions. Test dir: $TEST_DIR. Framework config: .agentic-qa/frameworks/$FRAMEWORK.json. App URL: ${APP_URL:-not provided}." \
+            --agent planner \
+            --append-system-prompt-file .agentic-qa/CLAUDE.md \
+            --allowedTools "$ALLOWED_TOOLS,mcp__${MCP_SERVER}__*" \
             --mcp-config .mcp.json \
             --strict-mcp-config \
             --permission-mode dontAsk \
-            --max-turns "$MAX_TURNS"
+            --max-turns "$MAX_TURNS" || status=$?
+          if [ ! -s results/plan.md ]; then
+            echo "::error::The planner agent did not write results/plan.md (claude exit code $status)."
+            exit 1
+          fi
+          [ "$status" -eq 0 ] || echo "::warning::claude exited with code $status (e.g. the turn limit); using the plan it wrote."
+
+      - name: Generate tests (generator agent)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MAX_TURNS: ${{ inputs.generate_max_turns }}
+        run: |
+          status=0
+          claude -p "Implement the scenarios in results/plan.md as tests in $TEST_DIR and write results/generate-report.json as described in your instructions. Framework config: .agentic-qa/frameworks/$FRAMEWORK.json. App URL: ${APP_URL:-not provided}." \
+            --agent generator \
+            --append-system-prompt-file .agentic-qa/CLAUDE.md \
+            --allowedTools "$ALLOWED_TOOLS,mcp__${MCP_SERVER}__*" \
+            --mcp-config .mcp.json \
+            --strict-mcp-config \
+            --permission-mode dontAsk \
+            --max-turns "$MAX_TURNS" || status=$?
+          [ "$status" -eq 0 ] || echo "::warning::claude exited with code $status (e.g. the turn limit); checking what the generator produced."
+          if [ ! -s results/generate-report.json ]; then
+            echo "::warning::The generator agent did not write results/generate-report.json; the PR description will rely on the diff."
+          fi
 
       - name: Run tests
         id: run
@@ -245,12 +291,12 @@ jobs:
       - name: Detect test changes
         id: changes
         run: |
-          changes="$(git status --porcelain --untracked-files=all -- . ':(exclude).mcp.json' ':(exclude)CLAUDE.md' ':(exclude).claude')"
+          changes="$(git status --porcelain --untracked-files=all -- . ':(exclude).mcp.json' ':(exclude).claude')"
           if [ -n "$changes" ]; then
             echo "$changes"
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::error::The generator did not create or change any test files; see the 'Plan and generate' step."
+            echo "::error::The generator did not create or change any test files; see the 'Generate tests' step."
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
@@ -263,22 +309,25 @@ jobs:
         run: |
           fingerprint() { { git diff HEAD --binary; git ls-files --others --exclude-standard -z | xargs -0 -r sha256sum; } | sha256sum; }
           before="$(fingerprint)"
-          claude -p "Use the pr-writer agent to write PR_BODY.md for this auto-generate run. Framework: $FRAMEWORK. Test dir: $TEST_DIR. Test run after generation: $TEST_OUTCOME. Read spec.md, results/plan.md, results/generate-report.json, results/failures.json, results/anti-cheat.txt and the git diff." \
-            --allowedTools "Read,Edit,Write,Bash,Glob,Grep" \
+          status=0
+          claude -p "Write PR_BODY.md for this auto-generate run as described in your instructions. Framework: $FRAMEWORK. Test dir: $TEST_DIR. Test run after generation: $TEST_OUTCOME. Read spec.md, results/plan.md, results/generate-report.json, results/failures.json, results/anti-cheat.txt and the git diff." \
+            --agent pr-writer \
+            --append-system-prompt-file .agentic-qa/CLAUDE.md \
+            --allowedTools "$ALLOWED_TOOLS" \
             --strict-mcp-config \
             --permission-mode dontAsk \
-            --max-turns "$MAX_TURNS"
+            --max-turns "$PR_WRITER_MAX_TURNS" || status=$?
           if [ "$(fingerprint)" != "$before" ]; then
             echo "::error::The pr-writer agent changed files after anti-cheat ran. Refusing to open the pull request."
             exit 1
           fi
-          test -s PR_BODY.md || { echo "::error::The pr-writer agent did not write PR_BODY.md."; exit 1; }
+          test -s PR_BODY.md || { echo "::error::The pr-writer agent did not write PR_BODY.md (claude exit code $status)."; exit 1; }
 
       - name: Restore platform-staged files
         if: steps.changes.outputs.changed == 'true'
         run: |
           # Staging may have overwritten files the repository tracks; they must not end up in the pull request.
-          for p in .mcp.json CLAUDE.md .claude; do
+          for p in .mcp.json .claude/settings.json .claude/agents; do
             if git ls-files --error-unmatch -- "$p" > /dev/null 2>&1; then git checkout -- "$p"; fi
           done
           git status --short
@@ -286,7 +335,7 @@ jobs:
       - name: Open pull request
         id: pr
         if: steps.changes.outputs.changed == 'true'
-        uses: peter-evans/create-pull-request@v8
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           branch: auto-generate/${{ github.run_id }}
           base: ${{ github.head_ref || github.ref_name }}

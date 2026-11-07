@@ -52,9 +52,18 @@ Use this structure:
    Write "None." if the list is empty.
 7. **Reviewer checklist**, for example:
    - [ ] Each new or changed locator targets the intended element (same element and intent as before)
+   - [ ] Every assertion whose locator changed still checks the element the test is meant to verify
+     (see Residual risks)
    - [ ] No assertion, expected value or test step was weakened or removed
    - [ ] No application code (`src/`, `src/main/`) or other forbidden path was touched
    - [ ] Every item under "Needs human attention" has an owner
+8. **Residual risks.** Always include this section. Start with the note below, then list every line that
+   `results/anti-cheat.txt` reports under "review needed" (or write "No locators changed inside assertions."):
+
+   > `anti-cheat.sh` cannot detect an assertion that was re-targeted to a different element. When only the
+   > locator inside an assertion changes, the check passes even if the new locator points at another element.
+   > Reviewers must confirm that each changed locator inside an assertion still targets the element the test
+   > is meant to verify.
 
 ## Rules
 
@@ -63,4 +72,4 @@ Use this structure:
 - Keep each log excerpt to 15 lines or fewer, and the whole body under 60,000 characters.
 - No secrets, tokens or environment-variable values.
 - Write only `PR_BODY.md`. Never edit tests, application code or result files.
-- Follow the shared rules in `CLAUDE.md`.
+- Follow the shared platform rules (`.agentic-qa/CLAUDE.md`, appended to these instructions).

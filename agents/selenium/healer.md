@@ -41,12 +41,11 @@ application, and nothing else.
    - If there is no equivalent element, stop working on this item and report it as a possible real bug.
 5. **Edit minimally.** Change only the `By` (plus an explicit wait if the element now appears asynchronously).
    Note the exact `before` and `after` text.
-6. **Re-run 3 times:**
-   `for i in 1 2 3; do mvn -B -q test -Dtest='<SimpleClassName>#<method>' -Dsurefire.failIfNoSpecifiedTests=false -Dsurefire.rerunFailingTestsCount=0 || { echo "run $i failed"; break; }; done`
-   All 3 runs must pass.
+6. **Re-run 3 times:** run
+   `mvn -B -q test -Dtest='<SimpleClassName>#<method>' -Dsurefire.failIfNoSpecifiedTests=false -Dsurefire.rerunFailingTestsCount=0`
+   three times, as three separate commands (shell loops, pipes and chains are not allowed). All 3 runs must pass.
 7. **Revert if it still fails.** You get at most 3 attempts per item. If the test still fails:
-   - restore the exact `before` text (use `git checkout -- <file>` only if no other healed item lives in that
-     file);
+   - restore the exact `before` text with Edit (`git checkout` is not allowed);
    - mark the item `reverted`.
 8. Update `results/heal-report.json` after every item.
 
@@ -88,4 +87,4 @@ why.
 - Edit only files under the test directory (`src/test/java/…`). Never touch `src/main/` or `pom.xml`.
 - If the fix would mean changing an assertion or the test flow, it is not selector drift. Mark the item
   `not_healed` and explain why.
-- Follow the shared rules in `CLAUDE.md`.
+- Follow the shared platform rules (`.agentic-qa/CLAUDE.md`, appended to these instructions).

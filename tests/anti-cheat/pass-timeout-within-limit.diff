@@ -1,0 +1,15 @@
+# expect: pass
+# raises an assertion timeout to 30000 ms (within the 60000 ms limit)
+diff --git a/tests/checkout.spec.ts b/tests/checkout.spec.ts
+index c761cb9..90da60d 100644
+--- a/tests/checkout.spec.ts
++++ b/tests/checkout.spec.ts
+@@ -6,7 +6,7 @@ test.describe('Checkout', () => {
+     await page.getByTestId('coupon-input').fill('SAVE10');
+     await page.getByTestId('apply-coupon').click();
+     await expect(page.getByTestId('total')).toHaveText('$9.00');
+-    await expect(page.getByRole('status')).toBeVisible({ timeout: 10000 });
++    await expect(page.getByRole('status')).toBeVisible({ timeout: 30000 });
+     expect(await page.title()).toBe('Checkout');
+   });
+ });

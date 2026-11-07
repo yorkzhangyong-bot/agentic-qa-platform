@@ -1,0 +1,9 @@
+[
+  {
+    "name": "Checkout › applies a coupon",
+    "classname": "checkout.spec.ts",
+    "file": "tests/checkout.spec.ts",
+    "message": "Error: locator.click: Test timeout of 30000ms exceeded. (waiting for getByTestId('apply-coupon'))",
+    "stack": "[chromium] › checkout.spec.ts:4:7 › Checkout › applies a coupon\n\n    Error: locator.click: Test timeout of 30000ms exceeded.\n    Call log:\n      - waiting for getByTestId('apply-coupon')\n\n        at /home/runner/work/app/app/tests/checkout.spec.ts:7:44"
+  }
+]

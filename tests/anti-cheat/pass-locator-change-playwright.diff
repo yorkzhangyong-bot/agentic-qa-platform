@@ -1,0 +1,17 @@
+# expect: pass
+# changes two locators, one inside an assertion (reported under 'review needed', not a violation)
+diff --git a/tests/checkout.spec.ts b/tests/checkout.spec.ts
+index c761cb9..f64d72d 100644
+--- a/tests/checkout.spec.ts
++++ b/tests/checkout.spec.ts
+@@ -4,8 +4,8 @@ test.describe('Checkout', () => {
+   test('applies a coupon', async ({ page }) => {
+     await page.goto('/checkout');
+     await page.getByTestId('coupon-input').fill('SAVE10');
+-    await page.getByTestId('apply-coupon').click();
+-    await expect(page.getByTestId('total')).toHaveText('$9.00');
++    await page.getByRole('button', { name: 'Apply' }).click();
++    await expect(page.getByTestId('order-total')).toHaveText('$9.00');
+     await expect(page.getByRole('status')).toBeVisible({ timeout: 10000 });
+     expect(await page.title()).toBe('Checkout');
+   });

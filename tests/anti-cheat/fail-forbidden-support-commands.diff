@@ -1,0 +1,14 @@
+# expect: fail
+# rule: forbidden path
+# edits cypress/support/commands.ts
+diff --git a/cypress/support/commands.ts b/cypress/support/commands.ts
+index 4fae17d..41be9c0 100644
+--- a/cypress/support/commands.ts
++++ b/cypress/support/commands.ts
+@@ -1,5 +1,5 @@
+ Cypress.Commands.add('login', (email: string) => {
+   cy.session(email, () => {
+-    cy.request('POST', '/api/test/login', { email });
++    cy.request('POST', '/api/test/session', { email });
+   });
+ });

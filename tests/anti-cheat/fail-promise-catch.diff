@@ -1,0 +1,16 @@
+# expect: fail
+# rule: try/catch around assertion
+# swallows an assertion failure with .catch()
+diff --git a/tests/checkout.spec.ts b/tests/checkout.spec.ts
+index c761cb9..2059343 100644
+--- a/tests/checkout.spec.ts
++++ b/tests/checkout.spec.ts
+@@ -6,7 +6,7 @@ test.describe('Checkout', () => {
+     await page.getByTestId('coupon-input').fill('SAVE10');
+     await page.getByTestId('apply-coupon').click();
+     await expect(page.getByTestId('total')).toHaveText('$9.00');
+-    await expect(page.getByRole('status')).toBeVisible({ timeout: 10000 });
++    await expect(page.getByRole('status')).toBeVisible({ timeout: 10000 }).catch(() => {});
+     expect(await page.title()).toBe('Checkout');
+   });
+ });

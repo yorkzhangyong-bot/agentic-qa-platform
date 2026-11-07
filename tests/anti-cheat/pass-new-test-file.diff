@@ -1,0 +1,16 @@
+# expect: pass
+# adds a new spec with web-first assertions and no sleeps
+diff --git a/tests/search.spec.ts b/tests/search.spec.ts
+new file mode 100644
+index 0000000..bafdd55
+--- /dev/null
++++ b/tests/search.spec.ts
+@@ -0,0 +1,8 @@
++import { test, expect } from '@playwright/test';
++
++test('finds a product', async ({ page }) => {
++  await page.goto('/search');
++  await page.getByRole('searchbox', { name: 'Search' }).fill('shirt');
++  await page.getByRole('button', { name: 'Search' }).click();
++  await expect(page.getByTestId('result')).toHaveCount(3);
++});

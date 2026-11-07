@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites id="" name="" tests="2" failures="1" skipped="0" errors="0" time="3.2">
+  <testsuite name="checkout.spec.ts" timestamp="2026-01-01T12:00:00.000Z" hostname="chromium" tests="2" failures="1" skipped="0" time="3.1" errors="0">
+    <testcase name="Checkout › applies a coupon" classname="checkout.spec.ts" time="2.1">
+      <failure message="checkout.spec.ts:4:7 applies a coupon" type="FAILURE"><![CDATA[  [chromium] › checkout.spec.ts:4:7 › Checkout › applies a coupon
+
+    Error: locator.click: Test timeout of 30000ms exceeded.
+    Call log:
+      - waiting for getByTestId('apply-coupon')
+
+        at /home/runner/work/app/app/tests/checkout.spec.ts:7:44]]></failure>
+    </testcase>
+    <testcase name="Checkout › shows the cart" classname="checkout.spec.ts" time="1.0">
+    </testcase>
+  </testsuite>
+</testsuites>

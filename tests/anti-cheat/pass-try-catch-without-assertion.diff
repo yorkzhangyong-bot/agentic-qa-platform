@@ -1,0 +1,18 @@
+# expect: pass
+# adds try/catch in a helper with no assertion nearby
+diff --git a/tests/helpers.ts b/tests/helpers.ts
+index f22437d..318600d 100644
+--- a/tests/helpers.ts
++++ b/tests/helpers.ts
+@@ -4,3 +4,11 @@ export const assertiveTone = 'polite';
+ export function formatPrice(cents: number): string {
+   return `$${(cents / 100).toFixed(2)}`;
+ }
++
++export function parseJson(text: string): unknown {
++  try {
++    return JSON.parse(text);
++  } catch {
++    return undefined;
++  }
++}

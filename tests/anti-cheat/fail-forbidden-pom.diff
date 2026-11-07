@@ -1,0 +1,14 @@
+# expect: fail
+# rule: forbidden path
+# edits pom.xml
+diff --git a/pom.xml b/pom.xml
+index a4ae050..ed9cab9 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -2,5 +2,5 @@
+   <modelVersion>4.0.0</modelVersion>
+   <groupId>com.acme</groupId>
+   <artifactId>anti-cheat-fixture-app</artifactId>
+-  <version>1.0.0</version>
++  <version>1.0.1</version>
+ </project>

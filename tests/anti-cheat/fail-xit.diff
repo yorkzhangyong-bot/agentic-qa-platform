@@ -1,0 +1,14 @@
+# expect: fail
+# rule: disabled test
+# it( -> xit(
+diff --git a/cypress/e2e/login.cy.ts b/cypress/e2e/login.cy.ts
+index 3875762..760e439 100644
+--- a/cypress/e2e/login.cy.ts
++++ b/cypress/e2e/login.cy.ts
+@@ -1,5 +1,5 @@
+ describe('Login', () => {
+-  it('logs in', () => {
++  xit('logs in', () => {
+     cy.visit('/login');
+     cy.get('[data-cy="email"]').type('user@example.com');
+     cy.get('[data-cy="submit"]').click();

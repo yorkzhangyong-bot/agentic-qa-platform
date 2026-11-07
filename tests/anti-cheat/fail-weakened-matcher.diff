@@ -1,0 +1,15 @@
+# expect: fail
+# rule: weakened assertion
+# changes toBe('Checkout') to toBeTruthy()
+diff --git a/tests/checkout.spec.ts b/tests/checkout.spec.ts
+index c761cb9..2982d02 100644
+--- a/tests/checkout.spec.ts
++++ b/tests/checkout.spec.ts
+@@ -7,6 +7,6 @@ test.describe('Checkout', () => {
+     await page.getByTestId('apply-coupon').click();
+     await expect(page.getByTestId('total')).toHaveText('$9.00');
+     await expect(page.getByRole('status')).toBeVisible({ timeout: 10000 });
+-    expect(await page.title()).toBe('Checkout');
++    expect(await page.title()).toBeTruthy();
+   });
+ });

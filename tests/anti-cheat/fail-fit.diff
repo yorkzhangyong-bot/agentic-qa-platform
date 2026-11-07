@@ -1,0 +1,14 @@
+# expect: fail
+# rule: disabled test
+# it( -> fit( (focuses one test, skips the rest)
+diff --git a/cypress/e2e/login.cy.ts b/cypress/e2e/login.cy.ts
+index 3875762..6d0b0f8 100644
+--- a/cypress/e2e/login.cy.ts
++++ b/cypress/e2e/login.cy.ts
+@@ -1,5 +1,5 @@
+ describe('Login', () => {
+-  it('logs in', () => {
++  fit('logs in', () => {
+     cy.visit('/login');
+     cy.get('[data-cy="email"]').type('user@example.com');
+     cy.get('[data-cy="submit"]').click();

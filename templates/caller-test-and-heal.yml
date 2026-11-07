@@ -1,11 +1,19 @@
 # Copy to .github/workflows/test-and-heal.yml in your repository.
+#
+# Cost: the `pull_request` trigger runs this for every push to every pull request, and each time a PR's tests fail
+# the triage and healer agents run and spend Anthropic API budget. To heal pull requests only on request, use the
+# label-gated variant: replace `pull_request:` with the two commented lines below it, uncomment the `if:` on the
+# job, and add the `heal-tests` label to a PR when you want it healed.
 name: Test & heal
 on:
   push:
     branches: [main]
   pull_request:
+  # pull_request:
+  #   types: [labeled]
 jobs:
   qa:
+    # if: github.event_name == 'push' || github.event.label.name == 'heal-tests'
     uses: yorkzhangyong-bot/agentic-qa-platform/.github/workflows/test-and-heal.yml@main
     permissions: { contents: write, pull-requests: write }
     with:

@@ -1,0 +1,17 @@
+# expect: fail
+# rule: forbidden path
+# forbidden: src/
+# with Playwright-style forbidden_paths (src/), even a locator change under src/ fails
+diff --git a/src/test/java/com/acme/LoginTest.java b/src/test/java/com/acme/LoginTest.java
+index 50795ef..a3679bf 100644
+--- a/src/test/java/com/acme/LoginTest.java
++++ b/src/test/java/com/acme/LoginTest.java
+@@ -14,7 +14,7 @@ class LoginTest extends BaseTest {
+     @Test
+     void logsIn() {
+         driver.get(baseUrl + "/login");
+-        driver.findElement(By.id("email")).sendKeys("user@example.com");
++        driver.findElement(By.name("email")).sendKeys("user@example.com");
+         driver.findElement(By.id("submit")).click();
+         new WebDriverWait(driver, Duration.ofSeconds(10))
+             .until(ExpectedConditions.visibilityOfElementLocated(By.id("welcome")));

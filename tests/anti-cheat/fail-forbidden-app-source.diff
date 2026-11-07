@@ -1,0 +1,15 @@
+# expect: fail
+# rule: forbidden path
+# edits application source under src/main/
+diff --git a/src/main/java/com/acme/App.java b/src/main/java/com/acme/App.java
+index 50c0d27..ac15889 100644
+--- a/src/main/java/com/acme/App.java
++++ b/src/main/java/com/acme/App.java
+@@ -2,6 +2,6 @@ package com.acme;
+ 
+ public class App {
+     public static String greeting() {
+-        return "Welcome back";
++        return "Welcome";
+     }
+ }

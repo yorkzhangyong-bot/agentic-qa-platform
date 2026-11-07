@@ -1,0 +1,9 @@
+[
+  {
+    "name": "logsIn",
+    "classname": "com.acme.LoginTest",
+    "file": "src/test/java/com/acme/LoginTest.java",
+    "message": "org.openqa.selenium.NoSuchElementException: no such element: Unable to locate element: {\"method\":\"css selector\",\"selector\":\"#welcome\"}",
+    "stack": "org.openqa.selenium.NoSuchElementException: no such element: Unable to locate element: {\"method\":\"css selector\",\"selector\":\"#welcome\"}\n\tat com.acme.LoginTest.logsIn(LoginTest.java:21)"
+  }
+]

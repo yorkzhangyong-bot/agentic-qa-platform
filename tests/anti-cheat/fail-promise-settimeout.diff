@@ -1,0 +1,15 @@
+# expect: fail
+# rule: fixed sleep
+# adds await new Promise(resolve => setTimeout(resolve, 1000))
+diff --git a/tests/checkout.spec.ts b/tests/checkout.spec.ts
+index c761cb9..51d732f 100644
+--- a/tests/checkout.spec.ts
++++ b/tests/checkout.spec.ts
+@@ -3,6 +3,7 @@ import { test, expect } from '@playwright/test';
+ test.describe('Checkout', () => {
+   test('applies a coupon', async ({ page }) => {
+     await page.goto('/checkout');
++    await new Promise((resolve) => setTimeout(resolve, 1000));
+     await page.getByTestId('coupon-input').fill('SAVE10');
+     await page.getByTestId('apply-coupon').click();
+     await expect(page.getByTestId('total')).toHaveText('$9.00');

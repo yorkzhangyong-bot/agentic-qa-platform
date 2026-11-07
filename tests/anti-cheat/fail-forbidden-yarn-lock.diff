@@ -1,0 +1,10 @@
+# expect: fail
+# rule: forbidden path
+# adds yarn.lock
+diff --git a/yarn.lock b/yarn.lock
+new file mode 100644
+index 0000000..ef45249
+--- /dev/null
++++ b/yarn.lock
+@@ -0,0 +1 @@
++# yarn lockfile v1

@@ -1,0 +1,15 @@
+# expect: fail
+# rule: forbidden path
+# edits package.json
+diff --git a/package.json b/package.json
+index de07b0b..ed38156 100644
+--- a/package.json
++++ b/package.json
+@@ -2,6 +2,6 @@
+   "name": "anti-cheat-fixture-app",
+   "private": true,
+   "scripts": {
+-    "test": "playwright test"
++    "test": "playwright test --retries=3"
+   }
+ }

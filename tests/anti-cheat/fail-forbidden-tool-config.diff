@@ -1,0 +1,10 @@
+# expect: fail
+# rule: forbidden path
+# adds vite.config.mjs (matches *.config.{ts,js,mjs,cjs})
+diff --git a/vite.config.mjs b/vite.config.mjs
+new file mode 100644
+index 0000000..ff8b4c5
+--- /dev/null
++++ b/vite.config.mjs
+@@ -0,0 +1 @@
++export default {};

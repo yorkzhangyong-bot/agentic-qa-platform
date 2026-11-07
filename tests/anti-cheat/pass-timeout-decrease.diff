@@ -1,0 +1,13 @@
+# expect: pass
+# lowers an existing 90000 ms timeout to 75000 ms (not an increase)
+diff --git a/tests/slow.spec.ts b/tests/slow.spec.ts
+index 918bb10..f6cbd92 100644
+--- a/tests/slow.spec.ts
++++ b/tests/slow.spec.ts
+@@ -3,5 +3,5 @@ import { test, expect } from '@playwright/test';
+ test('exports a large report', async ({ page }) => {
+   await page.goto('/reports');
+   await page.getByRole('button', { name: 'Export' }).click();
+-  await expect(page.getByTestId('export-done')).toBeVisible({ timeout: 90000 });
++  await expect(page.getByTestId('export-done')).toBeVisible({ timeout: 75000 });
+ });

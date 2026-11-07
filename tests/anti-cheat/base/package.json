@@ -1,0 +1,7 @@
+{
+  "name": "anti-cheat-fixture-app",
+  "private": true,
+  "scripts": {
+    "test": "playwright test"
+  }
+}

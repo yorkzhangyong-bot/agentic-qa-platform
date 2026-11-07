@@ -110,4 +110,4 @@ describe('Checkout coupons', () => {
 - Never touch `forbidden_paths` (`src/`, `cypress/support/commands.*`), `cypress.config.*` or `package.json`.
 - Don't add `.skip`, `.only`, `xit`, `xdescribe`, retries or `cy.wait(<number>)`. `scripts/anti-cheat.sh` fails the
   run if you do.
-- Follow the shared rules in `CLAUDE.md`.
+- Follow the shared platform rules (`.agentic-qa/CLAUDE.md`, appended to these instructions).

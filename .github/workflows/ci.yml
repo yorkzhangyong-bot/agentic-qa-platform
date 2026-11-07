@@ -1,0 +1,114 @@
+name: ci
+
+# CI for this repository: lint the scripts and workflows, validate the configs and agent definitions, and run the
+# fixture tests for scripts/anti-cheat.sh and scripts/parse-report.sh.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lint:
+    name: Lint and validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: shellcheck
+        run: |
+          shellcheck --version
+          shellcheck scripts/*.sh tests/run-tests.sh
+
+      - name: actionlint
+        env:
+          ACTIONLINT_VERSION: "1.7.7"
+        run: |
+          bash <(curl -sSfL "https://raw.githubusercontent.com/rhysd/actionlint/v${ACTIONLINT_VERSION}/scripts/download-actionlint.bash") "$ACTIONLINT_VERSION"
+          # -shellcheck= : scripts/ get their own shellcheck step; inline run: blocks deliberately use unquoted globs
+          #                and single-quoted jq filters that shellcheck would report.
+          # -ignore: job.workflow_repository / job.workflow_sha are newer than this actionlint's context schema.
+          ./actionlint -color -shellcheck= -ignore 'property "workflow_(repository|sha)" is not defined'
+
+      - name: Validate JSON configs
+        run: |
+          required='["name","install","run","report_glob","test_glob","default_test_dir","locator_priority","forbidden_paths","agents_dir","mcp"]'
+          for f in frameworks/*.json; do
+            jq -e --argjson req "$required" '. as $c | $req | all(. as $k | $c | has($k))' "$f" > /dev/null \
+              || { echo "::error file=$f::missing one of the required keys $required"; exit 1; }
+            name="$(jq -r .name "$f")"
+            [ "$name" = "$(basename "$f" .json)" ] || { echo "::error file=$f::name '$name' must match the file name"; exit 1; }
+            agents="$(jq -r .agents_dir "$f")"
+            for role in planner generator healer; do
+              [ -f "$agents/$role.md" ] || { echo "::error file=$f::$agents/$role.md is missing"; exit 1; }
+            done
+            echo "ok  $f"
+          done
+          jq -e '.mcpServers | length > 0' .mcp.json > /dev/null && echo "ok  .mcp.json"
+          jq -e '(.permissions.allow | length > 0) and (.permissions.deny | length > 0)' settings/claude-settings.json > /dev/null \
+            && echo "ok  settings/claude-settings.json"
+
+      - name: Validate agent front matter
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          errors = []
+          expected = {"agents/common": {"triage", "pr-writer"}}
+          for folder in sorted(p for p in pathlib.Path("agents").iterdir() if p.is_dir() and p.name != "common"):
+              expected[folder.as_posix()] = {"planner", "generator", "healer"}
+          base_tools = {"Read", "Write", "Edit", "Bash", "Glob", "Grep"}
+          for folder, names in expected.items():
+              found = set()
+              for path in sorted(pathlib.Path(folder).glob("*.md")):
+                  text = path.read_text(encoding="utf-8")
+                  m = re.match(r"---\n(.*?)\n---\n", text, re.S)
+                  if not m:
+                      errors.append(f"{path}: missing YAML front matter")
+                      continue
+                  fields = {}
+                  for line in m.group(1).splitlines():
+                      key, sep, value = line.partition(":")
+                      if sep:
+                          fields[key.strip()] = value.strip()
+                  missing = {"name", "description", "tools"} - fields.keys()
+                  if missing:
+                      errors.append(f"{path}: missing {', '.join(sorted(missing))}")
+                      continue
+                  tools = {t.strip() for t in fields["tools"].split(",")}
+                  if not base_tools <= tools:
+                      errors.append(f"{path}: tools must include {', '.join(sorted(base_tools))}")
+                  if not text[m.end():].strip():
+                      errors.append(f"{path}: the system prompt is empty")
+                  found.add(fields["name"])
+                  print(f"ok  {path} -> {fields['name']}")
+              if found != names:
+                  errors.append(f"{folder}: expected agents {sorted(names)}, found {sorted(found)}")
+          for error in errors:
+              print(f"::error::{error}")
+          sys.exit(1 if errors else 0)
+          PY
+
+  fixtures:
+    name: Fixture tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: anti-cheat.sh and parse-report.sh fixtures
+        run: bash tests/run-tests.sh

@@ -1,0 +1,16 @@
+# expect: fail
+# rule: disabled test
+# test( -> test.skip(
+diff --git a/tests/checkout.spec.ts b/tests/checkout.spec.ts
+index c761cb9..410ceae 100644
+--- a/tests/checkout.spec.ts
++++ b/tests/checkout.spec.ts
+@@ -1,7 +1,7 @@
+ import { test, expect } from '@playwright/test';
+ 
+ test.describe('Checkout', () => {
+-  test('applies a coupon', async ({ page }) => {
++  test.skip('applies a coupon', async ({ page }) => {
+     await page.goto('/checkout');
+     await page.getByTestId('coupon-input').fill('SAVE10');
+     await page.getByTestId('apply-coupon').click();

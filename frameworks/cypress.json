@@ -7,7 +7,7 @@
   "test_glob": "cypress/e2e/**/*.cy.{js,ts}",
   "default_test_dir": "cypress/e2e",
   "locator_priority": ["data-cy", "data-testid", "role", "text"],
-  "forbidden_paths": ["src/", "cypress/support/commands.*"],
+  "forbidden_paths": ["src/", "cypress/support/commands.*", "cypress.config.*"],
   "agents_dir": "agents/cypress",
   "mcp": "browser"
 }

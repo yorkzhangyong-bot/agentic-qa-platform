@@ -1,0 +1,15 @@
+# expect: fail
+# rule: disabled test
+# adds @Ignore to a JUnit test
+diff --git a/src/test/java/com/acme/LoginTest.java b/src/test/java/com/acme/LoginTest.java
+index 50795ef..3607c28 100644
+--- a/src/test/java/com/acme/LoginTest.java
++++ b/src/test/java/com/acme/LoginTest.java
+@@ -11,6 +11,7 @@ import org.openqa.selenium.support.ui.WebDriverWait;
+ 
+ class LoginTest extends BaseTest {
+ 
++    @Ignore
+     @Test
+     void logsIn() {
+         driver.get(baseUrl + "/login");

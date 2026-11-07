@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites id="" name="" tests="2" failures="0" skipped="0" errors="0" time="2.0">
+  <testsuite name="search.spec.ts" timestamp="2026-01-01T12:00:00.000Z" hostname="chromium" tests="2" failures="0" skipped="0" time="2.0" errors="0">
+    <testcase name="Search › finds a product" classname="search.spec.ts" time="1.2"/>
+    <testcase name="Search › shows suggestions" classname="search.spec.ts" time="0.8"/>
+  </testsuite>
+</testsuites>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" name="com.acme.LoginTest" time="3.2" tests="2" errors="1" skipped="0" failures="0">
+  <properties>
+    <property name="java.version" value="17"/>
+  </properties>
+  <testcase name="logsIn" classname="com.acme.LoginTest" time="2.1">
+    <error message="no such element: Unable to locate element: {&quot;method&quot;:&quot;css selector&quot;,&quot;selector&quot;:&quot;#welcome&quot;}" type="org.openqa.selenium.NoSuchElementException"><![CDATA[org.openqa.selenium.NoSuchElementException: no such element: Unable to locate element: {"method":"css selector","selector":"#welcome"}
+	at com.acme.LoginTest.logsIn(LoginTest.java:21)]]></error>
+  </testcase>
+  <testcase name="showsForm" classname="com.acme.LoginTest" time="1.1"/>
+</testsuite>

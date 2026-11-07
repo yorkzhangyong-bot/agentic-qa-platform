@@ -1,0 +1,15 @@
+# expect: fail
+# rule: disabled test
+# test( -> xtest(
+diff --git a/tests/slow.spec.ts b/tests/slow.spec.ts
+index 918bb10..8f59cb9 100644
+--- a/tests/slow.spec.ts
++++ b/tests/slow.spec.ts
+@@ -1,6 +1,6 @@
+ import { test, expect } from '@playwright/test';
+ 
+-test('exports a large report', async ({ page }) => {
++xtest('exports a large report', async ({ page }) => {
+   await page.goto('/reports');
+   await page.getByRole('button', { name: 'Export' }).click();
+   await expect(page.getByTestId('export-done')).toBeVisible({ timeout: 90000 });

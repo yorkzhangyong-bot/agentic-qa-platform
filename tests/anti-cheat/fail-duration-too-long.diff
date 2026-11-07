@@ -1,0 +1,16 @@
+# expect: fail
+# rule: long timeout
+# raises a WebDriverWait from Duration.ofSeconds(10) to (120)
+diff --git a/src/test/java/com/acme/LoginTest.java b/src/test/java/com/acme/LoginTest.java
+index 50795ef..d4f861d 100644
+--- a/src/test/java/com/acme/LoginTest.java
++++ b/src/test/java/com/acme/LoginTest.java
+@@ -16,7 +16,7 @@ class LoginTest extends BaseTest {
+         driver.get(baseUrl + "/login");
+         driver.findElement(By.id("email")).sendKeys("user@example.com");
+         driver.findElement(By.id("submit")).click();
+-        new WebDriverWait(driver, Duration.ofSeconds(10))
++        new WebDriverWait(driver, Duration.ofSeconds(120))
+             .until(ExpectedConditions.visibilityOfElementLocated(By.id("welcome")));
+         assertEquals("Welcome back", driver.findElement(By.id("welcome")).getText());
+     }

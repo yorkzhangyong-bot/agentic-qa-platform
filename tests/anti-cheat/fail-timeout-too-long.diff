@@ -1,0 +1,16 @@
+# expect: fail
+# rule: long timeout
+# raises an assertion timeout from 10000 to 120000 ms
+diff --git a/tests/checkout.spec.ts b/tests/checkout.spec.ts
+index c761cb9..82f59b5 100644
+--- a/tests/checkout.spec.ts
++++ b/tests/checkout.spec.ts
+@@ -6,7 +6,7 @@ test.describe('Checkout', () => {
+     await page.getByTestId('coupon-input').fill('SAVE10');
+     await page.getByTestId('apply-coupon').click();
+     await expect(page.getByTestId('total')).toHaveText('$9.00');
+-    await expect(page.getByRole('status')).toBeVisible({ timeout: 10000 });
++    await expect(page.getByRole('status')).toBeVisible({ timeout: 120000 });
+     expect(await page.title()).toBe('Checkout');
+   });
+ });

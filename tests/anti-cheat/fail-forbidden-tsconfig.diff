@@ -1,0 +1,14 @@
+# expect: fail
+# rule: forbidden path
+# edits tsconfig.json
+diff --git a/tsconfig.json b/tsconfig.json
+index aee0ec9..8ad9c98 100644
+--- a/tsconfig.json
++++ b/tsconfig.json
+@@ -1,5 +1,5 @@
+ {
+   "compilerOptions": {
+-    "strict": true
++    "strict": false
+   }
+ }

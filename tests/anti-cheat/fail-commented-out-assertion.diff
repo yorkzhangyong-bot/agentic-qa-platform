@@ -1,0 +1,15 @@
+# expect: fail
+# rule: removed assertion
+# comments out a Cypress .should() assertion
+diff --git a/cypress/e2e/login.cy.ts b/cypress/e2e/login.cy.ts
+index 3875762..b1071c9 100644
+--- a/cypress/e2e/login.cy.ts
++++ b/cypress/e2e/login.cy.ts
+@@ -3,6 +3,6 @@ describe('Login', () => {
+     cy.visit('/login');
+     cy.get('[data-cy="email"]').type('user@example.com');
+     cy.get('[data-cy="submit"]').click();
+-    cy.get('[data-cy="welcome"]').should('have.text', 'Welcome back');
++    // cy.get('[data-cy="welcome"]').should('have.text', 'Welcome back');
+   });
+ });

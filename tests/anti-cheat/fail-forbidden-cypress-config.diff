@@ -1,0 +1,10 @@
+# expect: fail
+# rule: forbidden path
+# adds cypress.config.ts
+diff --git a/cypress.config.ts b/cypress.config.ts
+new file mode 100644
+index 0000000..ff8b4c5
+--- /dev/null
++++ b/cypress.config.ts
+@@ -0,0 +1 @@
++export default {};

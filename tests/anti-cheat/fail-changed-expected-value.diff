@@ -1,0 +1,16 @@
+# expect: fail
+# rule: removed assertion
+# changes the expected value of an assertion
+diff --git a/tests/checkout.spec.ts b/tests/checkout.spec.ts
+index c761cb9..cbcd639 100644
+--- a/tests/checkout.spec.ts
++++ b/tests/checkout.spec.ts
+@@ -5,7 +5,7 @@ test.describe('Checkout', () => {
+     await page.goto('/checkout');
+     await page.getByTestId('coupon-input').fill('SAVE10');
+     await page.getByTestId('apply-coupon').click();
+-    await expect(page.getByTestId('total')).toHaveText('$9.00');
++    await expect(page.getByTestId('total')).toHaveText('$8.00');
+     await expect(page.getByRole('status')).toBeVisible({ timeout: 10000 });
+     expect(await page.title()).toBe('Checkout');
+   });

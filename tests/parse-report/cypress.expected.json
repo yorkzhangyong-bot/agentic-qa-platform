@@ -1,0 +1,9 @@
+[
+  {
+    "name": "Login logs in",
+    "classname": "logs in",
+    "file": "cypress/e2e/login.cy.ts",
+    "message": "AssertionError: Timed out retrying after 4000ms: Expected to find element: `[data-cy=\"submit\"]`, but never found it.",
+    "stack": "AssertionError: Timed out retrying after 4000ms: Expected to find element: `[data-cy=\"submit\"]`, but never found it.\n    at Context.eval (webpack://app/./cypress/e2e/login.cy.ts:5:8)"
+  }
+]

@@ -152,7 +152,7 @@ for report in reports:
             "stack": clip(text, 4000),
         })
 
-with open(out_path, "w", encoding="utf-8") as fh:
+with open(out_path, "w", encoding="utf-8", newline="\n") as fh:
     json.dump(failures, fh, indent=2, ensure_ascii=False)
     fh.write("\n")
 

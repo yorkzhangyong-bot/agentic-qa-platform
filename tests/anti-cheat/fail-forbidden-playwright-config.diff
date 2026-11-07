@@ -1,0 +1,14 @@
+# expect: fail
+# rule: forbidden path
+# edits playwright.config.ts
+diff --git a/playwright.config.ts b/playwright.config.ts
+index 526a00c..052a1e3 100644
+--- a/playwright.config.ts
++++ b/playwright.config.ts
+@@ -2,5 +2,5 @@ import { defineConfig } from '@playwright/test';
+ 
+ export default defineConfig({
+   testDir: 'tests',
+-  retries: 0,
++  retries: 3,
+ });

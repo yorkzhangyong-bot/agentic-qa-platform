@@ -1,0 +1,14 @@
+# expect: pass
+# adds an explicit wait for an element
+diff --git a/tests/checkout.spec.ts b/tests/checkout.spec.ts
+index c761cb9..8089588 100644
+--- a/tests/checkout.spec.ts
++++ b/tests/checkout.spec.ts
+@@ -4,6 +4,7 @@ test.describe('Checkout', () => {
+   test('applies a coupon', async ({ page }) => {
+     await page.goto('/checkout');
+     await page.getByTestId('coupon-input').fill('SAVE10');
++    await page.getByTestId('apply-coupon').waitFor();
+     await page.getByTestId('apply-coupon').click();
+     await expect(page.getByTestId('total')).toHaveText('$9.00');
+     await expect(page.getByRole('status')).toBeVisible({ timeout: 10000 });

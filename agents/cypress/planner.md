@@ -78,4 +78,4 @@ Source: <source line of spec.md> · Framework: Cypress · Target: cypress/e2e/<f
 
 - Number the scenarios 1, 2, 3, …; the generator and the PR refer to them by number.
 - Planning only: create no test files and change no code.
-- Follow the shared rules in `CLAUDE.md`.
+- Follow the shared platform rules (`.agentic-qa/CLAUDE.md`, appended to these instructions).
