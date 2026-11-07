@@ -48,7 +48,7 @@ generate-tests.yml
 | Engine | Install | Secret | Model | Known gaps |
 |---|---|---|---|---|
 | `claude` (default) | `npm i -g @anthropic-ai/claude-code@<claude_code_version>` (default `2.1.283`) | `ANTHROPIC_API_KEY` | Claude Code's default | None known. This is the engine the agents were written and checked against: exact turn limits (`--max-turns`), and Bash limited by `settings/claude-settings.json`. |
-| `opencode` | `npm i -g opencode-ai@<opencode_version>` (default `1.0.0`) | At least one of `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY` (the one matching the model's provider) | `opencode_model`, default `deepseek/deepseek-chat` | See the list below. |
+| `opencode` | `npm i -g opencode-ai@<opencode_version>` (default `1.0.0`) | At least one of `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY` (the one matching the model's provider) | `opencode_model`, default `deepseek/deepseek-flash` | See the list below. |
 
 OpenCode's known gaps:
 - No turn cap: `MAX_TURNS` is emulated with a time limit of 30 s per turn.
@@ -170,7 +170,7 @@ OpenCode's known gaps:
 | `heal_max_turns` | no | `40` | Turn budget for the healer agent. Exact on claude; emulated on opencode. |
 | `claude_code_version` | no | `"2.1.283"` | Version of `@anthropic-ai/claude-code` (engine `claude`). |
 | `opencode_version` | no | `"1.0.0"` | Version of `opencode-ai` (engine `opencode`). Unverified default; set it to the version you test with. |
-| `opencode_model` | no | `deepseek/deepseek-chat` | Model for the OpenCode agents, as `provider/model`. |
+| `opencode_model` | no | `deepseek/deepseek-flash` | Model for the OpenCode agents, as `provider/model`. |
 | `playwright_mcp_version` | no | `"0.0.84"` | Version of `@playwright/mcp`, written into the staged MCP config. |
 | `platform_ref` | no | `""` | Optional branch, tag or SHA of this repository to take scripts, agents and configs from. Empty uses the commit of the called workflow (`job.workflow_sha`). |
 
@@ -229,7 +229,7 @@ How it runs:
 | `generate_max_turns` | no | `80` | Turn budget for the generator agent. |
 | `claude_code_version` | no | `"2.1.283"` | Version of `@anthropic-ai/claude-code` (engine `claude`). |
 | `opencode_version` | no | `"1.0.0"` | Version of `opencode-ai` (engine `opencode`). Unverified default. |
-| `opencode_model` | no | `deepseek/deepseek-chat` | Model for the OpenCode agents. |
+| `opencode_model` | no | `deepseek/deepseek-flash` | Model for the OpenCode agents. |
 | `playwright_mcp_version` | no | `"0.0.84"` | Version of `@playwright/mcp`. |
 | `platform_ref` | no | `""` | Optional ref override, as in `test-and-heal.yml`. Empty uses the commit of the called workflow. |
 

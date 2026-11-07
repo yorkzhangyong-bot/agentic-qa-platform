@@ -10,7 +10,7 @@
 #   TEST_DIR                test directory (default: the framework's default_test_dir). OpenCode may only edit
 #                           files there, in results/ and PR_BODY.md.
 #   PLAYWRIGHT_MCP_VERSION  @playwright/mcp version to pin (default: the version in settings/claude-mcp.json)
-#   OPENCODE_MODEL          provider/model for the OpenCode agents (default: deepseek/deepseek-chat)
+#   OPENCODE_MODEL          provider/model for the OpenCode agents (default: deepseek/deepseek-flash)
 #   SKIP_MCP_WARMUP=1       don't pre-download the MCP server (offline use, tests)
 #
 # ENGINE=claude    .claude/agents/<file>.md   copies of agents/common/*.md and agents/<framework>/*.md
@@ -92,7 +92,7 @@ if engine == "claude":
     write(".mcp.json", json.dumps({"mcpServers": servers}, indent=2) + "\n")
     staged += [".claude/settings.json", ".mcp.json"]
 else:
-    model = os.environ.get("OPENCODE_MODEL") or "deepseek/deepseek-chat"
+    model = os.environ.get("OPENCODE_MODEL") or "deepseek/deepseek-flash"
     builtin = {"Read": "read", "Write": "write", "Edit": "edit", "Bash": "bash", "Glob": "glob", "Grep": "grep"}
     for src in agents:
         fields, body = front_matter(src)

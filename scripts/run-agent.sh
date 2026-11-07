@@ -11,7 +11,7 @@
 #   EXPECTED_OUTPUT  file the agent must write; the script fails if it is missing or empty afterwards
 #   PLATFORM_DIR     agentic-qa-platform checkout (default .agentic-qa); AGENT-RULES.md is read from there
 #   claude only:     ALLOWED_TOOLS (default Read,Edit,Write,Glob,Grep,Agent,Task), MCP_SERVER (default browser)
-#   opencode only:   OPENCODE_MODEL (default deepseek/deepseek-chat), OPENCODE_SECONDS_PER_TURN (default 30)
+#   opencode only:   OPENCODE_MODEL (default deepseek/deepseek-flash), OPENCODE_SECONDS_PER_TURN (default 30)
 #
 # Credentials come from the environment: ANTHROPIC_API_KEY for claude; for opencode the key of the model's
 # provider (DEEPSEEK_API_KEY, OPENROUTER_API_KEY or OPENAI_API_KEY).
@@ -62,7 +62,7 @@ case "$engine" in
     else
       echo "::warning::timeout(1) not found; running opencode without the ${seconds}s limit that stands in for MAX_TURNS."
     fi
-    ${runner[@]+"${runner[@]}"} opencode run --agent "$agent" --model "${OPENCODE_MODEL:-deepseek/deepseek-chat}" "$prompt" < /dev/null || status=$?
+    ${runner[@]+"${runner[@]}"} opencode run --agent "$agent" --model "${OPENCODE_MODEL:-deepseek/deepseek-flash}" "$prompt" < /dev/null || status=$?
     [ "$status" -ne 124 ] || echo "::warning::opencode reached the ${seconds}s limit that stands in for MAX_TURNS=${max_turns}."
     ;;
   *)

@@ -53,7 +53,7 @@ on:
       opencode_model:
         description: Model for the OpenCode agents, as provider/model.
         type: string
-        default: deepseek/deepseek-chat
+        default: deepseek/deepseek-flash
       playwright_mcp_version:
         description: Version of @playwright/mcp to run as the browser MCP server.
         type: string
