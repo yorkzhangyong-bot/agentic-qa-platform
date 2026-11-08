@@ -6,6 +6,10 @@
 #                    An optional "# forbidden: a,b" header replaces the default framework forbidden paths.
 #   parse-report.sh  Each tests/parse-report/<name>.xml is parsed in a sample project and compared with
 #                    tests/parse-report/<name>.expected.json; with no report files the output must be [].
+#   write-summary.sh The same sample reports, tests/write-summary/edge-cases.xml and, with triage.json, the
+#                    Playwright sample must produce tests/write-summary/<name>.expected.md. No reports, broken
+#                    reports, a broken or missing triage file, an unwritable summary and a missing python3 are
+#                    checked too; every run must exit 0.
 #   fetch-spec.sh    The Spec Kit folder tests/fetch-spec/specs/003-feature must produce
 #                    tests/fetch-spec/003-feature.expected.md; an empty folder must fail; a file is copied unchanged.
 #   stage-agents.sh  Staging for claude and for opencode in a scratch repo must produce the expected files.
@@ -99,6 +103,100 @@ if [ "$code" -eq 0 ] && [ "$(cat "$project/results/failures.json")" = "[]" ]; th
 else
   bad "no-report-files" "expected exit 0 and [], got exit $code"$'\n'"$output"
 fi
+
+echo
+echo "write-summary.sh"
+summary="$work/summary.md"
+summary_reports() {  # summary_reports <report>...: make these the only files in the sample project's results/
+  rm -rf "$project/results"
+  mkdir -p "$project/results"
+  if [ "$#" -gt 0 ]; then cp "$@" "$project/results/"; fi
+}
+summary_run() {  # summary_run <framework> <arg>...: run write-summary.sh in the sample project; sets $code
+  rm -f "$summary"
+  set +e
+  (cd "$project" && env GITHUB_STEP_SUMMARY="$summary" FRAMEWORK="$1" COMMIT_SHA=0123456789abcdef0123456789abcdef01234567 \
+    GITHUB_SERVER_URL=https://github.com GITHUB_REPOSITORY=acme/shop bash "$root/scripts/write-summary.sh" "${@:2}" \
+    > "$work/summary.log" 2>&1)
+  code=$?
+  set -e
+}
+summary_expect() {  # summary_expect <name>: exit 0 and exactly tests/write-summary/<name>.expected.md
+  if [ "$code" -eq 0 ] && diff -u "$root/tests/write-summary/$1.expected.md" "$summary" > "$work/summary.diff" 2>&1; then
+    ok "$1"
+  else
+    bad "$1" "exit $code"$'\n'"$(cat "$work/summary.diff" "$work/summary.log" 2> /dev/null)"
+  fi
+}
+summary_check() {  # summary_check <name> <+present|-absent>...: exit 0, and each text is (+) or isn't (-) in the summary
+  local name="$1" problems="" item
+  shift
+  for item in "$@"; do
+    if grep -qF -- "${item:1}" "$summary" 2> /dev/null; then
+      [ "${item:0:1}" = + ] || problems+="unexpected: ${item:1}"$'\n'
+    else
+      [ "${item:0:1}" = - ] || problems+="missing: ${item:1}"$'\n'
+    fi
+  done
+  if [ "$code" -eq 0 ] && [ -z "$problems" ]; then
+    ok "$name"
+  else
+    bad "$name" "exit $code"$'\n'"$problems$(cat "$summary" "$work/summary.log" 2> /dev/null)"
+  fi
+}
+for name in playwright cypress surefire passing; do
+  case "$name" in surefire) framework=selenium ;; passing) framework=playwright ;; *) framework="$name" ;; esac
+  summary_reports "$root/tests/parse-report/$name.xml"
+  summary_run "$framework" 'results/*.xml'
+  summary_expect "$name"
+done
+summary_reports "$root/tests/write-summary/edge-cases.xml"
+summary_run selenium 'results/*.xml'
+summary_expect edge-cases
+summary_reports "$root/tests/parse-report/playwright.xml"
+summary_run playwright 'results/*.xml' "$root/tests/write-summary/triage.json"
+summary_expect with-triage
+summary_reports "$root/tests/parse-report/cypress.xml"
+summary_run cypress 'results/*.xml' "$root/tests/write-summary/triage.json"
+summary_check not-triaged "+| Test | File | Error | Triage |" "+| _not triaged_ |"
+summary_reports "$root/tests/parse-report/playwright.xml"
+printf '{"items": [{"name": "checkout > applies a coupon", "classname": "other", "classification": "FLAKY", "reason": "Passed on re-run."}]}\n' \
+  > "$work/triage-retyped.json"
+summary_run playwright 'results/*.xml' "$work/triage-retyped.json"
+summary_check retyped-triage-name "+| **FLAKY**: Passed on re-run. |"
+summary_reports "$root/tests/parse-report/playwright.xml" "$root/tests/parse-report/passing.xml"
+summary_run playwright 'results/*.xml'
+summary_check multiple-reports "+**Total** 4 " "+**Passed** 3 " "+**Failed** 1 " "+**Duration** 5.2s"
+summary_reports
+summary_run playwright 'results/*.xml'
+summary_check no-reports "+No tests found" "-**Total**"
+summary_reports "$root/tests/parse-report/passing.xml"
+head -c 300 "$root/tests/parse-report/playwright.xml" > "$project/results/broken.xml"
+summary_run playwright 'results/*.xml'
+summary_check unparsable-report "+could not parse" "+results/broken.xml" "+**Total** 2 " "+**Passed** 2 "
+summary_reports "$root/tests/parse-report/playwright.xml"
+printf 'not json\n' > "$work/triage-broken.json"
+summary_run playwright 'results/*.xml' "$work/triage-broken.json"
+summary_check unparsable-triage "+could not read the triage file" "+| Checkout " "-| Triage |"
+summary_run playwright 'results/*.xml' "$work/no-such-triage.json"
+summary_check missing-triage "+No triage results" "-| Triage |"
+set +e
+(cd "$project" && env GITHUB_STEP_SUMMARY="$work/no-such-dir/summary.md" bash "$root/scripts/write-summary.sh" \
+  'results/*.xml' > "$work/summary.log" 2>&1)
+code=$?
+set -e
+if [ "$code" -eq 0 ]; then
+  ok "unwritable-summary"
+else
+  bad "unwritable-summary" "expected exit 0 even when the summary can't be written, got $code"$'\n'"$(cat "$work/summary.log")"
+fi
+rm -f "$summary"
+set +e
+(cd "$project" && env PATH=/nonexistent GITHUB_STEP_SUMMARY="$summary" "$BASH" "$root/scripts/write-summary.sh" \
+  'results/*.xml' > "$work/summary.log" 2>&1)
+code=$?
+set -e
+summary_check no-python3 "+python3 is not installed"
 
 echo
 echo "fetch-spec.sh"

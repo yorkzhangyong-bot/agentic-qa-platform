@@ -307,6 +307,13 @@ jobs:
           echo "+ $RUN_CMD"
           bash -c "$RUN_CMD"
 
+      - name: Test results summary
+        if: always()
+        continue-on-error: true   # the summary must never fail the job; write-summary.sh itself always exits 0
+        env:
+          REPORT_GLOB: ${{ needs.config.outputs.report_glob }}
+        run: bash "$PLATFORM_DIR/scripts/write-summary.sh" "$REPORT_GLOB"
+
       - name: Parse JUnit report
         env:
           REPORT_GLOB: ${{ needs.config.outputs.report_glob }}

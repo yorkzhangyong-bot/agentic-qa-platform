@@ -1,7 +1,8 @@
 name: ci
 
 # CI for this repository: lint the scripts and workflows, validate the configs, AGENT-RULES.md and the agent
-# definitions, and run the fixture tests (anti-cheat.sh, parse-report.sh, fetch-spec.sh, stage-agents.sh, run-agent.sh).
+# definitions, and run the fixture tests (anti-cheat.sh, parse-report.sh, write-summary.sh, fetch-spec.sh,
+# stage-agents.sh, run-agent.sh).
 
 on:
   push:

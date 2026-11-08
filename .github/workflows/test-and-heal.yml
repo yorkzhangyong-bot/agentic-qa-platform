@@ -184,6 +184,15 @@ jobs:
           echo "+ $RUN_CMD"
           bash -c "$RUN_CMD"
 
+      - name: Test results summary
+        if: always()
+        continue-on-error: true   # the summary must never fail the job; write-summary.sh itself always exits 0
+        env:
+          FRAMEWORK: ${{ inputs.framework }}
+          REPORT_GLOB: ${{ needs.config.outputs.report_glob }}
+          COMMIT_SHA: ${{ steps.sha.outputs.sha }}
+        run: bash .agentic-qa/scripts/write-summary.sh "$REPORT_GLOB"
+
       - name: Collect results and reports
         if: always()
         env:
@@ -374,6 +383,24 @@ jobs:
           echo "drift=$drift" >> "$GITHUB_OUTPUT"
           echo "SELECTOR_DRIFT items: $drift"
 
+      # The summary reads a fresh copy of the reports, because a re-run during triage can overwrite the ones in the
+      # workspace (a single Maven test rewrites its class's report; Cypress may add a report for the spec).
+      - name: Download the original test reports for the summary
+        if: always() && steps.triage.outcome != 'skipped'
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: test-results
+          path: ${{ runner.temp }}/test-results
+
+      - name: Test results summary with triage
+        if: always() && steps.triage.outcome != 'skipped'
+        continue-on-error: true   # the summary must never fail the job; write-summary.sh itself always exits 0
+        env:
+          REPORT_GLOB: ${{ runner.temp }}/test-results/${{ needs.config.outputs.report_glob }}
+          COMMIT_SHA: ${{ needs.test.outputs.sha }}
+        run: bash "$PLATFORM_DIR/scripts/write-summary.sh" "$REPORT_GLOB" results/triage.json
+
       - name: Heal selector drift (healer agent)
         id: heal
         if: steps.triage.outputs.drift != '' && steps.triage.outputs.drift != '0'
@@ -505,16 +532,11 @@ jobs:
           PR_URL: ${{ steps.pr.outputs.pull-request-url }}
           PR_OPERATION: ${{ steps.pr.outputs.pull-request-operation }}
         run: |
+          # Each failure's classification and reason are in the "Test results summary with triage" table above.
           {
             echo "## Auto-heal (${FRAMEWORK}, engine ${ENGINE})"
             echo
             echo "Failing tests: $(jq length results/failures.json)"
-            if [ -f results/triage.json ]; then
-              echo
-              echo "| Test | Classification | Reason |"
-              echo "|---|---|---|"
-              jq -r '.items[]? | "| \(.name // "?" | gsub("[|\\r\\n]"; " ")) | \(.classification // "?") | \(.reason // "" | gsub("[|\\r\\n]"; " ")) |"' results/triage.json
-            fi
             if [ -n "$PR_URL" ]; then echo; echo "Pull request (${PR_OPERATION:-unknown}): $PR_URL"; fi
           } >> "$GITHUB_STEP_SUMMARY"
 

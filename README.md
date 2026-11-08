@@ -24,8 +24,9 @@ test-and-heal.yml
   config ──► test ──(tests failed)──► heal
   │          check out the commit,    check out the same commit
   │          install, run tests,      parse-report.sh → results/failures.json
-  │          upload "test-results"    stage-agents.sh (engine-specific config)
-  │                                   run-agent.sh triage → results/triage.json
+  │          write-summary.sh,        stage-agents.sh (engine-specific config)
+  │          upload "test-results"    run-agent.sh triage → results/triage.json
+  │                                   write-summary.sh (now with the triage classifications)
   │                                   run-agent.sh healer (only if SELECTOR_DRIFT) → results/heal-report.json
   │                                   anti-cheat.sh → run-agent.sh pr-writer → PR_BODY.md
   │                                   open PR auto-heal/<run_id>, or update + comment on the open auto-heal PR
@@ -35,13 +36,16 @@ generate-tests.yml
   config ──► generate: fetch-spec.sh → spec.md
                        stage-agents.sh → run-agent.sh planner → results/plan.md
                        run-agent.sh generator → tests + results/generate-report.json
-                       run tests → anti-cheat.sh → run-agent.sh pr-writer → PR auto-generate/<run_id>
+                       run tests → write-summary.sh → anti-cheat.sh
+                       run-agent.sh pr-writer → PR auto-generate/<run_id>
 ```
 
 - **`scripts/stage-agents.sh`** writes the agents, the shared rules ([`AGENT-RULES.md`](AGENT-RULES.md)),
   permissions and MCP config in the format of the selected engine.
 - **`scripts/run-agent.sh`** runs one agent non-interactively with its own turn budget. It fails if the agent
   didn't write its result file, instead of silently reporting "no changes".
+- **`scripts/write-summary.sh`** adds the test results to the job summary, with the triage classifications once
+  triage has run (see [Job summary](#job-summary)).
 
 ## Agent engines
 
@@ -99,12 +103,14 @@ OpenCode's known gaps:
 ├── scripts/
 │   ├── fetch-spec.sh            spec file, Spec Kit folder, GitHub issue or Jira ticket → spec.md
 │   ├── parse-report.sh          JUnit XML (any framework) → results/failures.json
+│   ├── write-summary.sh         JUnit XML (+ results/triage.json) → test results in the job summary
 │   ├── anti-cheat.sh            fails on forbidden paths, weakened assertions, skips, sleeps, long timeouts
 │   ├── stage-agents.sh          stages agents, rules, permissions and MCP config for ENGINE=claude|opencode
 │   └── run-agent.sh             runs one agent on the selected engine, checks its expected output
 ├── tests/                       fixture tests for the scripts (bash tests/run-tests.sh)
 │   ├── anti-cheat/              base/ sample project + *.diff fixtures (pass-* and fail-*)
 │   ├── parse-report/            Playwright, Cypress, Surefire XML + expected JSON
+│   ├── write-summary/           edge-case XML, triage.json + expected markdown
 │   └── fetch-spec/              Spec Kit folder fixture + expected spec.md
 ├── .github/workflows/
 │   ├── _select-framework.yml    validates the engine, reads frameworks/<framework>.json → outputs
@@ -196,11 +202,12 @@ How it runs:
 
 - **`config`** validates `engine` and reads the framework config.
 - **`test`** checks out the commit under test and outputs its SHA. For pull requests that is the PR head commit,
-  not GitHub's merge commit. It runs the suite with `continue-on-error` and always uploads the `test-results`
-  artifact.
+  not GitHub's merge commit. It runs the suite with `continue-on-error`, writes the [job summary](#job-summary)
+  and always uploads the `test-results` artifact.
 - **`heal`** checks out exactly the SHA the test job tested.
   - It runs only when the tests failed, gets `contents: write` and `pull-requests: write`, and is skipped for
     pull requests from forks, which don't receive secrets.
+  - After triage, it writes the [job summary](#job-summary) again, with each failure's classification and reason.
   - The healer runs only if triage found `SELECTOR_DRIFT` items.
   - The job fails if triage or the healer doesn't write its report.
   - The pr-writer agent runs with 20 turns.
@@ -242,6 +249,7 @@ Permissions: `contents: write` and `pull-requests: write`, plus `issues: read` s
 
 How it runs:
 - The job fails if the planner doesn't write `results/plan.md`, or if no test files change.
+- The [job summary](#job-summary) shows the results of the test run after generation.
 - The PR goes to branch `auto-generate/<run_id>` with the label `auto-generate`. It is opened as a **draft** if
   the tests fail after generation, for example because of a possible app bug the generator refused to hide.
 - Timeout (90 minutes) and concurrency work as in `test-and-heal.yml`.
@@ -255,6 +263,37 @@ compact JSON. It also outputs these derived values:
 - `forbidden_paths_csv`: the forbidden paths, comma-separated.
 - `runtime`: `java` if the commands use Maven or Gradle, otherwise `node`.
 - `engine`: the validated engine.
+
+## Job summary
+
+`scripts/write-summary.sh` reads the JUnit reports and adds the test results to the job summary, the markdown
+shown on the workflow run's **Summary** page:
+
+| Workflow | Job | When |
+|---|---|---|
+| `test-and-heal.yml` | `test` | After every test run, whether the tests passed or not. |
+| `test-and-heal.yml` | `heal` | After triage, with a **Triage** column: each failure's classification and reason. |
+| `generate-tests.yml` | `generate` | After the generated tests run. |
+
+Each summary shows:
+- a header with the framework and the tested commit;
+- the counts: total, passed, failed, skipped, and the duration;
+- a table of the failed tests: name, file, and the first line of the error, cut to 200 characters, with pipes and
+  other markdown characters escaped (at most 100 rows);
+- "No tests found" when no report matches the framework's `report_glob`.
+
+Failed tests are matched to the entries of `results/triage.json` by name and classname, or by name alone when
+that is unambiguous; a test without an entry shows "not triaged". The `heal` job reads a fresh download of the
+`test-results` artifact, because a test re-run during triage can overwrite the reports in the workspace.
+
+The summary never fails a job: the script always exits 0. A report or triage file it can't parse is skipped, and a
+warning in the summary names it.
+
+To preview it, run it from the repository under test. Without `GITHUB_STEP_SUMMARY` it prints the markdown:
+
+```bash
+FRAMEWORK=playwright bash .agentic-qa/scripts/write-summary.sh 'results/*.xml' results/triage.json
+```
 
 ## Spec sources
 
@@ -434,6 +473,8 @@ These are **not** detected by the script and must be checked by the reviewer (th
   - `anti-cheat.sh`: every `tests/anti-cheat/*.diff` is applied to `tests/anti-cheat/base/`; `pass-*` must pass and
     `fail-*` must report the rule named in its header;
   - `parse-report.sh`: the sample reports must produce their `*.expected.json`;
+  - `write-summary.sh`: the same sample reports, an edge-case report and a triage file must produce the markdown in
+    `tests/write-summary/*.expected.md`, and missing or broken input must still exit 0;
   - `fetch-spec.sh`: the Spec Kit folder must produce `003-feature.expected.md`;
   - `stage-agents.sh`: staging is checked for both engines;
   - `run-agent.sh`: the command lines are checked with stub `claude` / `opencode` executables.

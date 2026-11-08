@@ -1,0 +1,16 @@
+{
+  "framework": "playwright",
+  "summary": { "SELECTOR_DRIFT": 1, "REAL_BUG": 0, "FLAKY": 0, "ENV": 0 },
+  "items": [
+    {
+      "name": "Checkout › applies a coupon",
+      "classname": "checkout.spec.ts",
+      "file": "tests/checkout.spec.ts",
+      "classification": "SELECTOR_DRIFT",
+      "reason": "Timed out on getByTestId('apply-coupon'); the same Apply button now has data-testid='coupon-apply'.",
+      "broken_locator": "getByTestId('apply-coupon')",
+      "suggested_locator": "getByTestId('coupon-apply')",
+      "page_url": "https://staging.example.com/checkout"
+    }
+  ]
+}

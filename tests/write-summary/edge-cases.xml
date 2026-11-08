@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Edge cases for write-summary.sh: a pipe and other markdown characters in a test name and in an error line longer
+     than 200 characters, an error with only a message attribute, a skipped test, a class name that gives no file,
+     and a duration of more than a minute. -->
+<testsuite name="Cart" time="75.4" tests="4" failures="1" errors="1" skipped="1">
+  <testcase name="totals | rounding with *coupon* [SPRING10]" classname="Cart" time="40.1">
+    <failure message="expected: &lt;$20.00&gt; but was: &lt;$18.00&gt;" type="org.opentest4j.AssertionFailedError">org.opentest4j.AssertionFailedError: expected: &lt;$20.00&gt; but was: &lt;$18.00&gt; | cart=[item-1 x2, coupon=SPRING10, shipping=standard, tax=DE-19%, currency=EUR, locale=de-DE, session=4f1c2a9e-7b3d-4e8a-9c61-0d2f5b7a8e13, retries=0]
+    at Cart.totals(Cart.java:42)</failure>
+  </testcase>
+  <testcase name="checkout" classname="Cart" time="35.3">
+    <error message="Could not start a new session. Response code 500." type="org.openqa.selenium.SessionNotCreatedException"/>
+  </testcase>
+  <testcase name="empty cart" classname="Cart" time="0.0">
+    <skipped message="disabled until the cart service is back"/>
+  </testcase>
+  <testcase name="adds an item" classname="Cart" time="0.0"/>
+</testsuite>
