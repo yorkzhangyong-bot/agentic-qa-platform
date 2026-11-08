@@ -1,0 +1,23 @@
+[
+  {
+    "name": "Checkout › shows the order total",
+    "classname": "checkout.spec.ts",
+    "file": "tests/checkout.spec.ts",
+    "message": "Error: Timed out 5000ms waiting for expect(getByTestId('order-total')).toHaveText(\"$20.00\") but received \"$18.00\" (order 7f3e9a1c)",
+    "stack": "  [chromium] › checkout.spec.ts:9:7 › Checkout › shows the order total\n\n    Error: Timed out 5000ms waiting for expect(getByTestId('order-total')).toHaveText(\"$20.00\")\n\n        at /home/runner/work/shop/shop/tests/checkout.spec.ts:14:48"
+  },
+  {
+    "name": "Checkout › applies a coupon",
+    "classname": "checkout.spec.ts",
+    "file": "tests/checkout.spec.ts",
+    "message": "Error: locator.click: Test timeout of 30000ms exceeded. (waiting for getByTestId('apply-coupon'))",
+    "stack": "Error: locator.click: Test timeout of 30000ms exceeded.\n    at /home/runner/work/shop/shop/tests/checkout.spec.ts:7:44"
+  },
+  {
+    "name": "rejects a wrong password",
+    "classname": "login.spec.ts",
+    "file": "tests/login.spec.ts",
+    "message": "Error: expect(locator).toBeVisible() failed for getByRole('alert') after 3 retries (session 4f1c2a9e-7b3d-4e8a-9c61-0d2f5b7a8e13)",
+    "stack": "Error: expect(locator).toBeVisible() failed\n\n    at /home/runner/work/shop/shop/tests/login.spec.ts:22:31"
+  }
+]

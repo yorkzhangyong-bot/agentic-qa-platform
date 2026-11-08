@@ -1,11 +1,16 @@
 name: test-and-heal
 
-# Reusable workflow: run the caller's UI tests. When they fail, the triage agent classifies each failure, the healer
-# agent repairs the SELECTOR_DRIFT ones, anti-cheat.sh checks the diff, and the pr-writer agent describes the result
-# in a pull request on auto-heal/<run_id>, or in an update to the open auto-heal PR for the same base branch.
+# Reusable workflow: run the caller's UI tests. When they fail, the triage agent classifies each failure, and then two
+# jobs run in parallel:
+#   - heal: the healer agent repairs the SELECTOR_DRIFT failures, anti-cheat.sh checks the diff, and the pr-writer
+#     agent describes the result in a pull request on auto-heal/<run_id>, or in an update to the open auto-heal PR
+#     for the same base branch;
+#   - report-defects: the defect-reporter agent writes a report for each REAL_BUG failure, and
+#     scripts/report-defects.sh opens a GitHub issue for it, or comments on the open issue for the same failure.
 # Agents run on the selected engine (Claude Code or OpenCode) via scripts/stage-agents.sh and scripts/run-agent.sh.
 #
-#   config (frameworks/<framework>.json) ──► test ──(failed)──► heal: triage → healer → anti-cheat → pr-writer → PR
+#   config ──► test ──(failed)──► triage ──(SELECTOR_DRIFT)──► heal: healer → anti-cheat → pr-writer → PR
+#                                        └─(REAL_BUG)────────► report-defects: defect-reporter → issues
 
 on:
   workflow_call:
@@ -42,6 +47,22 @@ on:
         description: Turn budget for the healer agent (claude --max-turns; emulated with a time limit on opencode).
         type: number
         default: 40
+      defect_max_turns:
+        description: Turn budget for the defect-reporter agent (claude --max-turns; emulated with a time limit on opencode).
+        type: number
+        default: 20
+      report_defects:
+        description: Open a GitHub issue for each REAL_BUG failure, or comment on the open issue for it. The caller must grant issues write either way.
+        type: boolean
+        default: true
+      defect_labels:
+        description: Comma-separated labels for new defect issues. Missing labels are created; agentic-qa is always added, because open issues are found again by it.
+        type: string
+        default: bug,agentic-qa
+      defect_assignees:
+        description: Comma-separated GitHub logins to assign new defect issues to. Empty assigns nobody.
+        type: string
+        default: ""
       claude_code_version:
         description: Version of @anthropic-ai/claude-code to install when engine is claude.
         type: string
@@ -202,7 +223,7 @@ jobs:
           dest="$RUNNER_TEMP/test-results"
           mkdir -p "$dest"
           report_dir="$(dirname "$REPORT_GLOB")"
-          # Copy results/** and the report directory, keeping repo-relative paths so `heal` can restore them.
+          # Copy results/** and the report directory, keeping repo-relative paths so `triage` can restore them.
           for f in results/** $report_dir/** $REPORT_GLOB; do
             if [ -f "$f" ]; then
               mkdir -p "$dest/$(dirname "$f")"
@@ -220,20 +241,18 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  heal:
-    name: Triage & heal
+  triage:
+    name: Triage
     needs: [config, test]
     # Pull requests from forks get no secrets, so there is nothing the agents could do there.
     if: >-
       needs.test.outputs.failed == 'true' &&
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-    permissions:
-      contents: write
-      pull-requests: write
+    timeout-minutes: 45
     outputs:
-      pr_url: ${{ steps.pr.outputs.pull-request-url }}
+      selector_drift: ${{ steps.triage.outputs.selector_drift }}
+      real_bugs: ${{ steps.triage.outputs.real_bugs }}
     env:
       ENGINE: ${{ inputs.engine }}
       FRAMEWORK: ${{ inputs.framework }}
@@ -243,9 +262,9 @@ jobs:
       MCP_SERVER: ${{ needs.config.outputs.mcp }}
       PLAYWRIGHT_MCP_VERSION: ${{ inputs.playwright_mcp_version }}
       OPENCODE_MODEL: ${{ inputs.opencode_model }}
-      PR_BASE: ${{ github.head_ref || github.ref_name }}
       MCP_TIMEOUT: "60000"
     steps:
+      # heal and report-defects run only after this job succeeded, so they rely on this check.
       - name: Check engine credentials
         env:
           HAS_ANTHROPIC: ${{ secrets.ANTHROPIC_API_KEY != '' }}
@@ -308,6 +327,7 @@ jobs:
           java-version: ${{ inputs.java_version }}
           cache: ${{ hashFiles('pom.xml') != '' && 'maven' || '' }}
 
+      # The triage agent may re-run a failing test once to check for flakiness.
       - name: Install dependencies
         env:
           INSTALL_SCRIPT: ${{ needs.config.outputs.install_script }}
@@ -335,7 +355,7 @@ jobs:
           count="$(jq 'length' results/failures.json)"
           echo "count=$count" >> "$GITHUB_OUTPUT"
           if [ "$count" -eq 0 ]; then
-            echo "::warning title=Nothing to heal::The tests failed but the JUnit report contains no failing test cases. This usually means an environment or setup problem; check the 'Run tests' step."
+            echo "::warning title=Nothing to triage::The tests failed but the JUnit report contains no failing test cases. This usually means an environment or setup problem; check the 'Run tests' step."
           fi
 
       - name: Install agent engine
@@ -356,12 +376,6 @@ jobs:
         if: steps.parse.outputs.count != '0'
         run: bash "$PLATFORM_DIR/scripts/stage-agents.sh"
 
-      - name: Record base commits
-        if: steps.parse.outputs.count != '0'
-        run: |
-          echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          echo "PLATFORM_SHA=$(git -C "$PLATFORM_DIR" rev-parse HEAD)" >> "$GITHUB_ENV"
-
       - name: Triage (triage agent)
         id: triage
         if: steps.parse.outputs.count != '0'
@@ -380,8 +394,12 @@ jobs:
         run: |
           bash "$PLATFORM_DIR/scripts/run-agent.sh"
           drift="$(jq '[.items[]? | select(.classification == "SELECTOR_DRIFT")] | length' results/triage.json)"
-          echo "drift=$drift" >> "$GITHUB_OUTPUT"
-          echo "SELECTOR_DRIFT items: $drift"
+          bugs="$(jq '[.items[]? | select(.classification == "REAL_BUG")] | length' results/triage.json)"
+          {
+            echo "selector_drift=$drift"
+            echo "real_bugs=$bugs"
+          } >> "$GITHUB_OUTPUT"
+          echo "SELECTOR_DRIFT items: $drift (heal), REAL_BUG items: $bugs (report-defects)"
 
       # The summary reads a fresh copy of the reports, because a re-run during triage can overwrite the ones in the
       # workspace (a single Maven test rewrites its class's report; Cypress may add a report for the spec).
@@ -401,9 +419,111 @@ jobs:
           COMMIT_SHA: ${{ needs.test.outputs.sha }}
         run: bash "$PLATFORM_DIR/scripts/write-summary.sh" "$REPORT_GLOB" results/triage.json
 
+      # heal and report-defects download this instead of triaging again.
+      - name: Upload triage results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: triage
+          path: |
+            results/triage.json
+            results/failures.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  heal:
+    name: Heal selector drift
+    needs: [config, test, triage]
+    if: fromJSON(needs.triage.outputs.selector_drift || '0') > 0
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      pr_url: ${{ steps.pr.outputs.pull-request-url }}
+    env:
+      ENGINE: ${{ inputs.engine }}
+      FRAMEWORK: ${{ inputs.framework }}
+      TEST_DIR: ${{ inputs.test_dir || needs.config.outputs.default_test_dir }}
+      APP_URL: ${{ inputs.app_url }}
+      PLATFORM_DIR: .agentic-qa
+      MCP_SERVER: ${{ needs.config.outputs.mcp }}
+      PLAYWRIGHT_MCP_VERSION: ${{ inputs.playwright_mcp_version }}
+      OPENCODE_MODEL: ${{ inputs.opencode_model }}
+      PR_BASE: ${{ github.head_ref || github.ref_name }}
+      MCP_TIMEOUT: "60000"
+    steps:
+      - name: Checkout the tested commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.test.outputs.sha }}
+          fetch-depth: 50
+          persist-credentials: false
+
+      - name: Checkout agentic-qa-platform
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ inputs.platform_ref || job.workflow_sha }}
+          token: ${{ secrets.PLATFORM_TOKEN || github.token }}
+          path: .agentic-qa
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: ${{ needs.config.outputs.runtime == 'node' && 'npm' || '' }}
+
+      - name: Set up Java
+        if: needs.config.outputs.runtime == 'java'
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java_version }}
+          cache: ${{ hashFiles('pom.xml') != '' && 'maven' || '' }}
+
+      - name: Install dependencies
+        env:
+          INSTALL_SCRIPT: ${{ needs.config.outputs.install_script }}
+        run: |
+          while IFS= read -r cmd; do
+            [ -n "$cmd" ] || continue
+            echo "::group::$cmd"
+            bash -c "$cmd" < /dev/null
+            echo "::endgroup::"
+          done <<< "$INSTALL_SCRIPT"
+
+      - name: Download triage results
+        uses: actions/download-artifact@v8
+        with:
+          name: triage
+          path: results
+
+      - name: Install agent engine
+        env:
+          CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
+          OPENCODE_VERSION: ${{ inputs.opencode_version }}
+        run: |
+          if [ "$ENGINE" = opencode ]; then
+            npm install -g "opencode-ai@${OPENCODE_VERSION}"
+            opencode --version
+          else
+            npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+            claude --version
+          fi
+
+      - name: Stage agents and engine config
+        run: bash "$PLATFORM_DIR/scripts/stage-agents.sh"
+
+      - name: Record base commits
+        run: |
+          echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "PLATFORM_SHA=$(git -C "$PLATFORM_DIR" rev-parse HEAD)" >> "$GITHUB_ENV"
+
       - name: Heal selector drift (healer agent)
         id: heal
-        if: steps.triage.outputs.drift != '' && steps.triage.outputs.drift != '0'
         env:
           ANTHROPIC_API_KEY: ${{ inputs.engine == 'claude' && secrets.ANTHROPIC_API_KEY || '' }}
           DEEPSEEK_API_KEY: ${{ inputs.engine == 'opencode' && secrets.DEEPSEEK_API_KEY || '' }}
@@ -419,7 +539,6 @@ jobs:
         run: bash "$PLATFORM_DIR/scripts/run-agent.sh"
 
       - name: Anti-cheat
-        if: steps.parse.outputs.count != '0'
         env:
           FORBIDDEN_PATHS: ${{ needs.config.outputs.forbidden_paths_csv }}
         run: |
@@ -432,7 +551,6 @@ jobs:
 
       - name: Detect test changes
         id: changes
-        if: steps.parse.outputs.count != '0'
         run: |
           changes="$(git status --porcelain --untracked-files=all -- . ':(exclude).mcp.json' ':(exclude).claude' \
             ':(exclude).opencode' ':(exclude)AGENTS.md' ':(exclude)opencode.json')"
@@ -527,16 +645,17 @@ jobs:
           gh pr comment "$NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/pr-comment.md"
 
       - name: Job summary
-        if: always() && steps.parse.outputs.count != '' && steps.parse.outputs.count != '0'
+        if: always()
         env:
+          SELECTOR_DRIFT: ${{ needs.triage.outputs.selector_drift }}
           PR_URL: ${{ steps.pr.outputs.pull-request-url }}
           PR_OPERATION: ${{ steps.pr.outputs.pull-request-operation }}
         run: |
-          # Each failure's classification and reason are in the "Test results summary with triage" table above.
+          # The triage job's summary lists every failure with its classification and reason.
           {
             echo "## Auto-heal (${FRAMEWORK}, engine ${ENGINE})"
             echo
-            echo "Failing tests: $(jq length results/failures.json)"
+            echo "SELECTOR_DRIFT failures handed to the healer: ${SELECTOR_DRIFT}"
             if [ -n "$PR_URL" ]; then echo; echo "Pull request (${PR_OPERATION:-unknown}): $PR_URL"; fi
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -548,5 +667,121 @@ jobs:
           path: |
             results/
             PR_BODY.md
+          if-no-files-found: ignore
+          retention-days: 14
+
+  report-defects:
+    name: Report defects
+    needs: [config, test, triage]
+    if: inputs.report_defects && fromJSON(needs.triage.outputs.real_bugs || '0') > 0
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+    env:
+      ENGINE: ${{ inputs.engine }}
+      FRAMEWORK: ${{ inputs.framework }}
+      TEST_DIR: ${{ inputs.test_dir || needs.config.outputs.default_test_dir }}
+      APP_URL: ${{ inputs.app_url }}
+      PLATFORM_DIR: .agentic-qa
+      MCP_SERVER: ${{ needs.config.outputs.mcp }}
+      PLAYWRIGHT_MCP_VERSION: ${{ inputs.playwright_mcp_version }}
+      OPENCODE_MODEL: ${{ inputs.opencode_model }}
+      MCP_TIMEOUT: "60000"
+      COMMIT_SHA: ${{ needs.test.outputs.sha }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      # The test code is read for the steps to reproduce; nothing is installed, because no test runs here.
+      - name: Checkout the tested commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.test.outputs.sha }}
+          persist-credentials: false
+
+      - name: Checkout agentic-qa-platform
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ inputs.platform_ref || job.workflow_sha }}
+          token: ${{ secrets.PLATFORM_TOKEN || github.token }}
+          path: .agentic-qa
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Download triage results
+        uses: actions/download-artifact@v8
+        with:
+          name: triage
+          path: results
+
+      - name: List defect candidates and fingerprints
+        run: bash "$PLATFORM_DIR/scripts/report-defects.sh" prepare
+
+      - name: Install agent engine
+        env:
+          CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
+          OPENCODE_VERSION: ${{ inputs.opencode_version }}
+        run: |
+          if [ "$ENGINE" = opencode ]; then
+            npm install -g "opencode-ai@${OPENCODE_VERSION}"
+            opencode --version
+          else
+            npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+            claude --version
+          fi
+
+      - name: Stage agents and engine config
+        run: bash "$PLATFORM_DIR/scripts/stage-agents.sh"
+
+      - name: Write defect reports (defect-reporter agent)
+        env:
+          ANTHROPIC_API_KEY: ${{ inputs.engine == 'claude' && secrets.ANTHROPIC_API_KEY || '' }}
+          DEEPSEEK_API_KEY: ${{ inputs.engine == 'opencode' && secrets.DEEPSEEK_API_KEY || '' }}
+          OPENROUTER_API_KEY: ${{ inputs.engine == 'opencode' && secrets.OPENROUTER_API_KEY || '' }}
+          OPENAI_API_KEY: ${{ inputs.engine == 'opencode' && secrets.OPENAI_API_KEY || '' }}
+          AGENT: defect-reporter
+          MAX_TURNS: ${{ inputs.defect_max_turns }}
+          ALLOWED_TOOLS: Read,Write,Glob,Grep
+          PROMPT: >-
+            Write a defect report for every candidate in results/defect-candidates.json as described in your
+            instructions. Test dir: ${{ env.TEST_DIR }}. Framework config: .agentic-qa/frameworks/${{ inputs.framework }}.json.
+            App URL: ${{ inputs.app_url || 'not provided' }}.
+        run: |
+          # The agent may write only in results/defects/. Every other file must be unchanged afterwards, above all
+          # the platform checkout and results/defect-candidates.json, which decide what gets published.
+          files() {
+            find . \( -path ./.git -o -path ./.agentic-qa/.git -o -path ./results/defects -o -path ./.playwright-mcp \
+              -o -path ./.opencode \) -prune -o -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum
+          }
+          files > "$RUNNER_TEMP/files-before.txt"
+          bash "$PLATFORM_DIR/scripts/run-agent.sh" || echo "::warning::The defect-reporter stopped early (exit code $?); publishing the reports it wrote."
+          files > "$RUNNER_TEMP/files-after.txt"
+          if ! diff "$RUNNER_TEMP/files-before.txt" "$RUNNER_TEMP/files-after.txt"; then
+            echo "::error::The defect-reporter agent changed files outside results/defects/ (see the diff above). Refusing to open issues."
+            exit 1
+          fi
+
+      - name: Open or update issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEFECT_LABELS: ${{ inputs.defect_labels }}
+          DEFECT_ASSIGNEES: ${{ inputs.defect_assignees }}
+        run: bash "$PLATFORM_DIR/scripts/report-defects.sh" publish
+
+      - name: Upload defect reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: defects
+          path: |
+            results/defect-candidates.json
+            results/defects/
+            results/defects-report.json
           if-no-files-found: ignore
           retention-days: 14

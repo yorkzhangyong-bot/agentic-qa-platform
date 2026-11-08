@@ -15,6 +15,10 @@
 #   stage-agents.sh  Staging for claude and for opencode in a scratch repo must produce the expected files.
 #   run-agent.sh     With stub `claude` / `opencode` executables, the expected command lines must be built, and a
 #                    missing EXPECTED_OUTPUT must fail the run.
+#   report-defects.sh  prepare on tests/report-defects/triage.json + failures.json must produce
+#                    defect-candidates.expected.json; fingerprints must match their definition, survive other timings,
+#                    ids and line numbers, and change with the error. publish runs with a stub `gh`: new issues, a
+#                    comment on an open issue, failed gh calls (never a failed run), missing and stray reports.
 #
 # Usage: bash tests/run-tests.sh          (exit code 0 when every check passes)
 set -euo pipefail
@@ -128,11 +132,11 @@ summary_expect() {  # summary_expect <name>: exit 0 and exactly tests/write-summ
     bad "$1" "exit $code"$'\n'"$(cat "$work/summary.diff" "$work/summary.log" 2> /dev/null)"
   fi
 }
-summary_check() {  # summary_check <name> <+present|-absent>...: exit 0, and each text is (+) or isn't (-) in the summary
-  local name="$1" problems="" item
-  shift
+check_texts() {  # check_texts <name> <file> <+present|-absent>...: exit 0, and each text is (+) or isn't (-) in the file
+  local name="$1" file="$2" problems="" item
+  shift 2
   for item in "$@"; do
-    if grep -qF -- "${item:1}" "$summary" 2> /dev/null; then
+    if grep -qF -- "${item:1}" "$file" 2> /dev/null; then
       [ "${item:0:1}" = + ] || problems+="unexpected: ${item:1}"$'\n'
     else
       [ "${item:0:1}" = - ] || problems+="missing: ${item:1}"$'\n'
@@ -141,8 +145,13 @@ summary_check() {  # summary_check <name> <+present|-absent>...: exit 0, and eac
   if [ "$code" -eq 0 ] && [ -z "$problems" ]; then
     ok "$name"
   else
-    bad "$name" "exit $code"$'\n'"$problems$(cat "$summary" "$work/summary.log" 2> /dev/null)"
+    bad "$name" "exit $code"$'\n'"$problems$(cat "$file" 2> /dev/null)"
   fi
+}
+summary_check() {  # summary_check <name> <+present|-absent>...: check_texts on the write-summary.sh output
+  local name="$1"
+  shift
+  check_texts "$name" "$summary" "$@"
 }
 for name in playwright cypress surefire passing; do
   case "$name" in surefire) framework=selenium ;; passing) framework=playwright ;; *) framework="$name" ;; esac
@@ -236,6 +245,7 @@ for engine in claude opencode; do
   if python3 - "$root" "$scratch" "$engine" > "$work/stage.check" 2>&1 <<'PY'
 import json
 import pathlib
+import re
 import sys
 
 root, scratch, engine = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
@@ -269,9 +279,11 @@ else:
         head, _, body = staged[4:].partition("\n---\n\n")
         expect(body == read(src).split("\n---\n", 1)[1].lstrip("\n"), f"{src.name}: body differs from the platform agent")
         expect("mode: all" in head and 'model: "openrouter/test-model"' in head, f"{src.name}: mode/model missing")
-        for tool in ('"read": true', '"write": true', '"edit": true', '"bash": true', '"glob": true', '"grep": true',
-                     '"webfetch": false'):
-            expect(tool in head, f"{src.name}: tools map lacks {tool}")
+        listed = {t.strip() for t in re.search(r"^tools:(.*)$", read(src), re.M).group(1).split(",")}
+        for claude_tool in ("Read", "Write", "Edit", "Bash", "Glob", "Grep"):  # unlisted tools must be off explicitly
+            want = f'"{claude_tool.lower()}": {"true" if claude_tool in listed else "false"}'
+            expect(want in head, f"{src.name}: tools map lacks {want}")
+        expect('"webfetch": false' in head, f"{src.name}: webfetch must be off")
         browser = '"browser_*": true' if "mcp__browser__*" in read(src) else '"browser_*": false'
         expect(browser in head, f"{src.name}: expected {browser}")
     expect(not (scratch / ".opencode" / "agent").exists(), "agents must be staged in .opencode/agents/, not .opencode/agent/")
@@ -341,6 +353,159 @@ run_case opencode-agent 0 \
 run_case missing-output-fails 1 - ENGINE=claude AGENT=triage MAX_TURNS=7 EXPECTED_OUTPUT=results/triage.json STUB_WRITE=0
 run_case early-stop-with-output-passes 0 - ENGINE=opencode AGENT=healer MAX_TURNS=7 EXPECTED_OUTPUT=results/heal-report.json STUB_EXIT=3
 run_case unknown-engine-fails 2 - ENGINE=gemini AGENT=triage MAX_TURNS=7
+
+echo
+echo "report-defects.sh"
+fixtures="$root/tests/report-defects"
+defects="$work/defects"
+transcript="$work/gh/transcript"
+cat > "$bin/gh" <<'STUB'
+#!/usr/bin/env bash
+# Test stub for gh: log the call, then answer as gh would. GH_* variables choose the scenario.
+printf '%s\n' "$*" >> "$GH_LOG"
+case "$1 $2" in
+  "issue list")
+    if [[ " $* " == *" --search "* ]]; then
+      if [ "${GH_FAIL_SEARCH:-0}" = 1 ]; then echo "HTTP 502: Server Error" >&2; exit 1; fi
+      printf '%s' "${GH_SEARCH_HIT:-}"
+    else
+      printf '%s' "${GH_BODY_HIT:-}"
+    fi
+    ;;
+  "label list") printf '%s\n' "${GH_LABELS:-bug}" ;;
+  "label create") ;;
+  "issue create")
+    prev=""
+    for arg in "$@"; do
+      if [ "$prev" = --body-file ]; then cat "$arg" >> "$GH_BODIES"; fi
+      prev="$arg"
+    done
+    if [ "${GH_FAIL_CREATE:-0}" = 1 ]; then echo "GraphQL: Resource not accessible by integration (createIssue)" >&2; exit 1; fi
+    if [ "${GH_FAIL_ASSIGNEE:-0}" = 1 ] && [[ " $* " == *" --assignee "* ]]; then
+      echo "could not assign user: 'qa-lead' not found" >&2
+      exit 1
+    fi
+    issue=$(( $(cat "$GH_COUNTER" 2> /dev/null || echo 100) + 1 ))
+    echo "$issue" > "$GH_COUNTER"
+    echo "https://github.com/acme/shop/issues/$issue"
+    ;;
+  "issue comment") echo "https://github.com/acme/shop/issues/$3#issuecomment-1" ;;
+  *) echo "gh stub: unexpected call: $*" >&2; exit 1 ;;
+esac
+STUB
+chmod +x "$bin/gh"
+defects_prepare() {  # defects_prepare <failures.json>: "report-defects.sh prepare" on tests/report-defects/triage.json
+  rm -rf "$defects"
+  mkdir -p "$defects/results"
+  cp "$fixtures/triage.json" "$defects/results/triage.json"
+  cp "$1" "$defects/results/failures.json"
+  set +e
+  (cd "$defects" && env COMMIT_SHA=0123456789abcdef0123456789abcdef01234567 RUN_URL=https://github.com/acme/shop/actions/runs/42 \
+    APP_URL=https://staging.example.com FRAMEWORK=playwright ENGINE=opencode OPENCODE_MODEL=deepseek/deepseek-flash \
+    bash "$root/scripts/report-defects.sh" prepare > "$work/defects.log" 2>&1)
+  code=$?
+  set -e
+}
+fingerprints() {  # fingerprints: the candidates' fingerprints, one per line
+  python3 - "$defects/results/defect-candidates.json" <<'PY'
+import json
+import sys
+
+for candidate in json.load(open(sys.argv[1], encoding="utf-8"))["candidates"]:
+    print(candidate["fingerprint"])
+PY
+}
+defects_setup() {  # defects_setup: the expected candidates and the sample reports in a fresh scratch project
+  rm -rf "$defects" "$work/gh"
+  mkdir -p "$defects/results" "$work/gh"
+  cp "$fixtures/defect-candidates.expected.json" "$defects/results/defect-candidates.json"
+  cp -R "$fixtures/defects" "$defects/results/defects"
+  touch "$work/gh/log" "$work/gh/bodies" "$work/gh/summary.md"
+}
+defects_publish() {  # defects_publish [VAR=value]...: "report-defects.sh publish" with the stub gh; sets $code, $transcript
+  set +e
+  (cd "$defects" && env PATH="$bin:$PATH" GH_LOG="$work/gh/log" GH_BODIES="$work/gh/bodies" GH_COUNTER="$work/gh/counter" \
+    GITHUB_STEP_SUMMARY="$work/gh/summary.md" COMMIT_SHA=0123456789abcdef0123456789abcdef01234567 \
+    RUN_URL=https://github.com/acme/shop/actions/runs/42 DEFECT_LABELS="bug, agentic-qa" DEFECT_ASSIGNEES=qa-lead "$@" \
+    bash "$root/scripts/report-defects.sh" publish > "$work/gh/output" 2>&1)
+  code=$?
+  set -e
+  local part
+  for part in "$work/gh/log" "$work/gh/output" "$work/gh/summary.md" "$defects/results/defects-report.json" "$work/gh/bodies"; do
+    printf '== %s\n' "${part##*/}"
+    cat "$part" 2> /dev/null || true
+  done > "$transcript"
+}
+
+defects_prepare "$fixtures/failures.json"
+if [ "$code" -eq 0 ] && python3 - "$defects/results/defect-candidates.json" "$fixtures/defect-candidates.expected.json" <<'PY'
+import json
+import sys
+
+actual, expected = (json.load(open(path, encoding="utf-8")) for path in sys.argv[1:3])
+sys.exit(0 if actual == expected else 1)
+PY
+then
+  ok "candidates"
+else
+  bad "candidates" "exit $code; differs from defect-candidates.expected.json:"$'\n'"$(cat "$work/defects.log" "$defects/results/defect-candidates.json" 2> /dev/null)"
+fi
+first_run="$(fingerprints)"
+fp_checkout="$(sed -n 1p <<< "$first_run")"
+fp_login="$(sed -n 2p <<< "$first_run")"
+# The documented definition: sha1 of "<test file>\n<test name>\n<first error line>", numbers and hex ids removed.
+want="$(printf '%s\n%s\n%s' tests/login.spec.ts 'rejects a wrong password' \
+  "Error: expect(locator).toBeVisible() failed for getByRole('alert') after retries (session )" | sha1sum | cut -c1-40)"
+if [ "$fp_login" = "$want" ]; then ok "fingerprint-definition"; else bad "fingerprint-definition" "got $fp_login, want $want"; fi
+defects_prepare "$fixtures/failures-rerun.json"
+if [ "$code" -eq 0 ] && [ "$(fingerprints)" = "$first_run" ]; then
+  ok "fingerprint-stable-across-runs"
+else
+  bad "fingerprint-stable-across-runs" "other timings, ids and line numbers changed the fingerprints:"$'\n'"$first_run"$'\n'"$(fingerprints 2>&1)"
+fi
+sed 's/toHaveText/toContainText/' "$fixtures/failures.json" > "$work/failures-changed.json"
+defects_prepare "$work/failures-changed.json"
+changed="$(fingerprints)"
+if [ "$code" -eq 0 ] && [ "$(sed -n 1p <<< "$changed")" != "$fp_checkout" ] && [ "$(sed -n 2p <<< "$changed")" = "$fp_login" ]; then
+  ok "fingerprint-follows-the-error"
+else
+  bad "fingerprint-follows-the-error" "a different assertion must change that failure's fingerprint, and only that one:"$'\n'"$changed"
+fi
+
+defects_setup
+defects_publish
+check_texts new-issues "$transcript" \
+  "+issue create --title [Agentic QA] Order total ignores the second item (Checkout " \
+  "+issue create --title [Agentic QA] Wrong password shows no error (rejects a wrong password)" \
+  "+--label bug,agentic-qa --assignee qa-lead" "+label create agentic-qa" "-label create bug" \
+  "+| opened | [#101](https://github.com/acme/shop/issues/101) |" "+\"number\": 102" \
+  "+<!-- agentic-qa-defect: $fp_checkout -->" "+<!-- agentic-qa-defect: $fp_login -->" \
+  "-0000000000000000000000000000000000000000" "+Spotted by @"$'\xe2\x80\x8b'"qa-team" "+\`@smoke\`"
+defects_setup
+defects_publish GH_SEARCH_HIT="42 https://github.com/acme/shop/issues/42"
+check_texts existing-issue-gets-a-comment "$transcript" \
+  "+issue comment 42 --body Still failing on 0123456789abcdef0123456789abcdef01234567" \
+  "+https://github.com/acme/shop/actions/runs/42" "-issue create" "+| still failing: commented |" "+\"updated\": ["
+defects_setup
+defects_publish GH_BODY_HIT="43 https://github.com/acme/shop/issues/43"
+check_texts found-in-bodies-when-search-lags "$transcript" "+issue comment 43 --body Still failing on" "-issue create"
+defects_setup
+defects_publish GH_FAIL_CREATE=1
+check_texts gh-failure-is-reported "$transcript" \
+  "+could not open the issue: GraphQL: Resource not accessible by integration" "+| **failed**: could not open" \
+  "+\"failed\": [" "+::warning::report-defects:"
+defects_setup
+defects_publish GH_FAIL_SEARCH=1
+check_texts search-failure-opens-nothing "$transcript" "+could not look for an open issue" "-issue create" "-issue comment"
+defects_setup
+defects_publish GH_FAIL_ASSIGNEE=1
+check_texts rejected-assignee-is-dropped "$transcript" "+opened (not assigned: could not assign user" \
+  "+\"note\": \"not assigned:" "+\"number\": 101"
+defects_setup
+rm "$defects/results/defects/rejects-a-wrong-password-"*.md
+printf '# [Agentic QA] Not a candidate\n' > "$defects/results/defects/rogue.md"
+defects_publish
+check_texts missing-and-stray-reports "$transcript" "+**no report**" "+rogue.md" "-Not a candidate" "+\"missing\": ["
 
 echo
 echo "$passed passed, $failed failed"

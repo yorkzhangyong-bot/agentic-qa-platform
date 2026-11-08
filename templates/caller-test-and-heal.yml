@@ -1,9 +1,12 @@
 # Copy to .github/workflows/test-and-heal.yml in your repository.
 #
-# Cost: the `pull_request` trigger runs this for every push to every pull request, and each time a PR's tests fail
-# the triage and healer agents run and spend API budget. To heal pull requests only on request, use the
-# label-gated variant: replace `pull_request:` with the two commented lines below it, uncomment the `if:` on the
-# job, and add the `heal-tests` label to a PR when you want it healed.
+# Cost: the `pull_request` trigger runs this for every push to every pull request. Each time a PR's tests fail, the
+# triage agent runs, then the healer and the defect reporter, and they spend API budget. To heal pull requests only
+# on request, use the label-gated variant: replace `pull_request:` with the two commented lines below it, uncomment
+# the `if:` on the job, and add the `heal-tests` label to a PR when you want it healed.
+#
+# Permissions: contents + pull-requests for auto-heal PRs, issues for defect reports (one issue per REAL_BUG
+# failure). GitHub won't start the workflow if one of them is missing, even with report_defects: false.
 name: Test & heal
 on:
   push:
@@ -15,12 +18,14 @@ jobs:
   qa:
     # if: github.event_name == 'push' || github.event.label.name == 'heal-tests'
     uses: yorkzhangyong-bot/agentic-qa-platform/.github/workflows/test-and-heal.yml@main
-    permissions: { contents: write, pull-requests: write }
+    permissions: { contents: write, pull-requests: write, issues: write }
     with:
       framework: playwright # playwright | cypress | selenium
       test_dir: tests
       app_url: ${{ vars.APP_URL }}
       # engine: opencode    # default claude; opencode needs one of the provider keys below
+      # report_defects: false             # default true: a GitHub issue per REAL_BUG failure
+      # defect_assignees: your-github-login  # comma-separated logins for new defect issues
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       # DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}

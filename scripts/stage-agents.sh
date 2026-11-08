@@ -105,6 +105,8 @@ else:
                 tools[f"{mcp.group(1)}_*"] = True  # OpenCode names MCP tools <server>_<tool>
             else:
                 print(f"stage-agents: {src.name}: no OpenCode equivalent for tool '{tool}'; skipped", file=sys.stderr)
+        for name in builtin.values():
+            tools.setdefault(name, False)  # a tool the agent doesn't list is switched off, not left at OpenCode's default
         tools["webfetch"] = False
         for name in servers:
             tools.setdefault(f"{name}_*", False)

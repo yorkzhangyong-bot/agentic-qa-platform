@@ -3,11 +3,13 @@
 Reusable GitHub Actions workflows and AI agents for UI testing across **Playwright**, **Cypress** and
 **Selenium (Java/Maven)**. The agents run on **Claude Code** (default) or **OpenCode**.
 
-- **Self-healing.** `test-and-heal.yml` runs your suite. When it fails:
+- **Self-healing and defect reporting.** `test-and-heal.yml` runs your suite. When it fails:
   - a *triage* agent classifies every failure (`SELECTOR_DRIFT`, `REAL_BUG`, `FLAKY`, `ENV`);
   - a *healer* agent repairs only the selector-drift failures, changing locators and waits but never assertions;
   - `anti-cheat.sh` checks the diff;
-  - a *pr-writer* agent opens an evidence-first pull request.
+  - a *pr-writer* agent opens an evidence-first pull request;
+  - in parallel, a *defect-reporter* agent writes a report for each real bug (`REAL_BUG`), and
+    `report-defects.sh` opens a GitHub issue for it, or comments on the open issue for the same failure.
 - **Test generation.** `generate-tests.yml` turns a spec into tests. The spec can be a markdown file, a
   [Spec Kit](#spec-sources) feature folder, a GitHub issue or a Jira ticket.
   - a *planner* agent writes a numbered test plan;
@@ -21,16 +23,20 @@ Whatever the test framework, the agents inspect the running app through one MCP 
 
 ```text
 test-and-heal.yml
-  config ──► test ──(tests failed)──► heal
-  │          check out the commit,    check out the same commit
-  │          install, run tests,      parse-report.sh → results/failures.json
-  │          write-summary.sh,        stage-agents.sh (engine-specific config)
-  │          upload "test-results"    run-agent.sh triage → results/triage.json
-  │                                   write-summary.sh (now with the triage classifications)
-  │                                   run-agent.sh healer (only if SELECTOR_DRIFT) → results/heal-report.json
-  │                                   anti-cheat.sh → run-agent.sh pr-writer → PR_BODY.md
-  │                                   open PR auto-heal/<run_id>, or update + comment on the open auto-heal PR
-  └─ _select-framework.yml validates the engine and reads frameworks/<framework>.json
+  config ──► test ──(tests failed)──► triage ──┬──(SELECTOR_DRIFT)──► heal
+                                               └──(REAL_BUG)────────► report-defects
+
+  config          _select-framework.yml validates the engine and reads frameworks/<framework>.json
+  test            check out the commit, install, run tests, write-summary.sh, upload "test-results"
+  triage          check out the same commit, parse-report.sh → results/failures.json, stage-agents.sh,
+                  run-agent.sh triage → results/triage.json, write-summary.sh (with the classifications),
+                  upload "triage"
+  heal            run-agent.sh healer → results/heal-report.json, anti-cheat.sh,
+                  run-agent.sh pr-writer → PR_BODY.md, open PR auto-heal/<run_id>
+                  (or update + comment on the open auto-heal PR)
+  report-defects  report-defects.sh prepare → results/defect-candidates.json,
+                  run-agent.sh defect-reporter → results/defects/<slug>.md,
+                  report-defects.sh publish → a new issue, or a comment on the open one
 
 generate-tests.yml
   config ──► generate: fetch-spec.sh → spec.md
@@ -46,13 +52,15 @@ generate-tests.yml
   didn't write its result file, instead of silently reporting "no changes".
 - **`scripts/write-summary.sh`** adds the test results to the job summary, with the triage classifications once
   triage has run (see [Job summary](#job-summary)).
+- **`scripts/report-defects.sh`** turns `REAL_BUG` failures into GitHub issues, without AI: `prepare` computes
+  each failure's fingerprint, `publish` opens or updates the issues (see [Defect reporting](#defect-reporting)).
 
 ## Agent engines
 
 | Engine | Install | Secret | Model | Known gaps |
 |---|---|---|---|---|
 | `claude` (default) | `npm i -g @anthropic-ai/claude-code@<claude_code_version>` (default `2.1.283`) | `ANTHROPIC_API_KEY` | Claude Code's default | None known. This is the engine the agents were written and checked against: exact turn limits (`--max-turns`), and Bash limited by `settings/claude-settings.json`. |
-| `opencode` | `npm i -g opencode-ai@<opencode_version>` (default `1.0.0`) | At least one of `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY` (the one matching the model's provider) | `opencode_model`, default `deepseek/deepseek-flash` | See the list below. |
+| `opencode` | `npm i -g opencode-ai@<opencode_version>` (default `1.19.5`) | At least one of `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY` (the one matching the model's provider) | `opencode_model`, default `deepseek/deepseek-flash` | See the list below. |
 
 OpenCode's known gaps:
 - No turn cap: `MAX_TURNS` is emulated with a time limit of 30 s per turn.
@@ -68,7 +76,7 @@ OpenCode's known gaps:
   - `.mcp.json` (from `settings/claude-mcp.json`, MCP version pinned).
 - **opencode:**
   - `.opencode/agents/<name>.md`, with front matter converted to `description`, `mode`, `model` and a `tools` map,
-    where `mcp__browser__*` becomes `"browser_*"`;
+    where `mcp__browser__*` becomes `"browser_*"` and built-in tools the agent doesn't list are set to `false`;
   - `AGENTS.md`, a copy of `AGENT-RULES.md`;
   - `opencode.json`: the `browser` MCP server (`type: local`) merged with `settings/opencode-permissions.json`.
     Bash uses the same allow/deny list as Claude, edits are limited to the test directory, `results/` and
@@ -92,7 +100,7 @@ OpenCode's known gaps:
 │   ├── cypress.json
 │   └── selenium.json
 ├── agents/                      agent definitions (Claude Code format; converted for OpenCode when staged)
-│   ├── common/                  triage.md, pr-writer.md
+│   ├── common/                  triage.md, pr-writer.md, defect-reporter.md
 │   ├── playwright/              planner.md, generator.md, healer.md
 │   ├── cypress/                 planner.md, generator.md, healer.md
 │   └── selenium/                planner.md, generator.md, healer.md
@@ -106,15 +114,17 @@ OpenCode's known gaps:
 │   ├── write-summary.sh         JUnit XML (+ results/triage.json) → test results in the job summary
 │   ├── anti-cheat.sh            fails on forbidden paths, weakened assertions, skips, sleeps, long timeouts
 │   ├── stage-agents.sh          stages agents, rules, permissions and MCP config for ENGINE=claude|opencode
-│   └── run-agent.sh             runs one agent on the selected engine, checks its expected output
+│   ├── run-agent.sh             runs one agent on the selected engine, checks its expected output
+│   └── report-defects.sh        REAL_BUG failures → fingerprinted candidates → GitHub issues (no AI)
 ├── tests/                       fixture tests for the scripts (bash tests/run-tests.sh)
 │   ├── anti-cheat/              base/ sample project + *.diff fixtures (pass-* and fail-*)
 │   ├── parse-report/            Playwright, Cypress, Surefire XML + expected JSON
 │   ├── write-summary/           edge-case XML, triage.json + expected markdown
+│   ├── report-defects/          triage + failures fixtures, expected candidates, sample defect reports
 │   └── fetch-spec/              Spec Kit folder fixture + expected spec.md
 ├── .github/workflows/
 │   ├── _select-framework.yml    validates the engine, reads frameworks/<framework>.json → outputs
-│   ├── test-and-heal.yml        reusable: test → triage → heal → PR
+│   ├── test-and-heal.yml        reusable: test → triage → heal → PR, and report-defects → issues
 │   ├── generate-tests.yml       reusable: spec → plan → tests → PR
 │   └── ci.yml                   CI for this repository
 └── templates/                   caller workflows for consumer repos
@@ -145,18 +155,22 @@ OpenCode's known gaps:
    production.
 3. Under **Settings → Actions → General**, enable **Allow GitHub Actions to create and approve pull requests**.
 4. Create the labels `auto-heal`, `auto-generate` and `ready-for-tests`. Only maintainers should be able to apply
-   `ready-for-tests`.
+   `ready-for-tests`. The defect labels (`bug` and `agentic-qa` by default) are created on first use.
 5. Copy `templates/caller-test-and-heal.yml` and `templates/caller-generate.yml` to `.github/workflows/`.
 6. In both files:
    - check that the `uses:` line points at this repository (the templates use
      `yorkzhangyong-bot/agentic-qa-platform`);
    - set `framework` (`playwright`, `cypress` or `selenium`) and, if needed, `engine` and `test_dir`.
+
+   Keep `issues: write` in the `permissions` of the test-and-heal caller. The `report-defects` job needs it, and
+   GitHub won't start the workflow without it, even with `report_defects: false`.
 7. Make the tests read their base URL from the environment. The workflows export `APP_URL` and `BASE_URL`, and
    for Cypress also `CYPRESS_BASE_URL`.
 8. Check that the framework's commands work from the repository root (`npm ci` + `npx playwright test`,
    `npx cypress run`, or `mvn -B test`).
-9. Push to `main` or open a pull request. Failures caused by selector drift come back as an `auto-heal` PR. The
-   template's comments show how to gate pull-request healing behind a label to save API budget.
+9. Push to `main` or open a pull request. Failures caused by selector drift come back as an `auto-heal` PR, and
+   real bugs as `agentic-qa` issues. The template's comments show how to gate pull-request healing behind a label
+   to save API budget.
 10. Label an issue `ready-for-tests`, or run the workflow manually with `spec_path`. Generated tests come back
     as an `auto-generate` PR.
 
@@ -174,8 +188,12 @@ OpenCode's known gaps:
 | `java_version` | no | `"17"` | Java version. Installed when the framework runs Maven or Gradle. |
 | `triage_max_turns` | no | `15` | Turn budget for the triage agent. Exact on claude; emulated on opencode. |
 | `heal_max_turns` | no | `40` | Turn budget for the healer agent. Exact on claude; emulated on opencode. |
+| `defect_max_turns` | no | `20` | Turn budget for the defect-reporter agent. Exact on claude; emulated on opencode. |
+| `report_defects` | no | `true` | Open a GitHub issue for each `REAL_BUG` failure, or comment on the open issue for it (see [Defect reporting](#defect-reporting)). |
+| `defect_labels` | no | `bug,agentic-qa` | Comma-separated labels for new defect issues. Missing labels are created; `agentic-qa` is always added, because open issues are found again by it. |
+| `defect_assignees` | no | `""` | Comma-separated GitHub logins to assign new defect issues to. If GitHub rejects them, the issue is opened unassigned and the summary says so. |
 | `claude_code_version` | no | `"2.1.283"` | Version of `@anthropic-ai/claude-code` (engine `claude`). |
-| `opencode_version` | no | `"1.0.0"` | Version of `opencode-ai` (engine `opencode`). Unverified default; set it to the version you test with. |
+| `opencode_version` | no | `"1.19.5"` | Version of `opencode-ai` (engine `opencode`). Unverified default; set it to the version you test with. |
 | `opencode_model` | no | `deepseek/deepseek-flash` | Model for the OpenCode agents, as `provider/model`. |
 | `playwright_mcp_version` | no | `"0.0.84"` | Version of `@playwright/mcp`, written into the staged MCP config. |
 | `platform_ref` | no | `""` | Optional branch, tag or SHA of this repository to take scripts, agents and configs from. Empty uses the commit of the called workflow (`job.workflow_sha`). |
@@ -190,8 +208,12 @@ OpenCode's known gaps:
 | `PLATFORM_TOKEN` | no | Read token for this repository. Only needed if it is private. |
 
 The secrets are optional in the workflow schema because which ones you need depends on `engine`. The first step of
-the agent job checks them and fails early, and it warns if `opencode_model`'s provider has no key. Each agent step
+the `triage` job checks them and fails early, and it warns if `opencode_model`'s provider has no key. Each agent step
 only receives the keys of the selected engine.
+
+Permissions: the caller must grant `contents: write` and `pull-requests: write` (for `heal`) and `issues: write`
+(for `report-defects`), as the template does. GitHub refuses to start a workflow whose jobs ask for more than the
+caller grants, even if those jobs would be skipped, so keep `issues: write` even with `report_defects: false`.
 
 | Output | Description |
 |---|---|
@@ -204,14 +226,19 @@ How it runs:
 - **`test`** checks out the commit under test and outputs its SHA. For pull requests that is the PR head commit,
   not GitHub's merge commit. It runs the suite with `continue-on-error`, writes the [job summary](#job-summary)
   and always uploads the `test-results` artifact.
-- **`heal`** checks out exactly the SHA the test job tested.
-  - It runs only when the tests failed, gets `contents: write` and `pull-requests: write`, and is skipped for
-    pull requests from forks, which don't receive secrets.
-  - After triage, it writes the [job summary](#job-summary) again, with each failure's classification and reason.
-  - The healer runs only if triage found `SELECTOR_DRIFT` items.
-  - The job fails if triage or the healer doesn't write its report.
+- **`triage`** runs only when the tests failed, and is skipped for pull requests from forks, which don't receive
+  secrets. It checks out exactly the SHA the test job tested.
+  - It runs the triage agent, then writes the [job summary](#job-summary) again, with each failure's
+    classification and reason.
+  - It uploads `results/triage.json` and `results/failures.json` as the `triage` artifact, which the next two jobs
+    download.
+  - It fails if the triage agent doesn't write its report; then neither of the next two jobs runs.
+- **`heal`** runs only if triage found `SELECTOR_DRIFT` items. It gets `contents: write` and `pull-requests: write`.
+  - The job fails if the healer doesn't write its report.
   - The pr-writer agent runs with 20 turns.
   - The job's timeout is 90 minutes.
+- **`report-defects`** runs alongside `heal`, only if `report_defects` is true and triage found `REAL_BUG` items. It
+  gets `contents: read` and `issues: write`; see [Defect reporting](#defect-reporting).
 - **Pull request.** If an open `auto-heal` PR already targets the same base branch, the run pushes its result to
   that PR's branch and comments on the PR. Otherwise it opens a new PR on `auto-heal/<run_id>`, titled
   "Auto-heal: repair failing tests", with the label `auto-heal`.
@@ -235,7 +262,7 @@ How it runs:
 | `plan_max_turns` | no | `20` | Turn budget for the planner agent. |
 | `generate_max_turns` | no | `80` | Turn budget for the generator agent. |
 | `claude_code_version` | no | `"2.1.283"` | Version of `@anthropic-ai/claude-code` (engine `claude`). |
-| `opencode_version` | no | `"1.0.0"` | Version of `opencode-ai` (engine `opencode`). Unverified default. |
+| `opencode_version` | no | `"1.19.5"` | Version of `opencode-ai` (engine `opencode`). Unverified default. |
 | `opencode_model` | no | `deepseek/deepseek-flash` | Model for the OpenCode agents. |
 | `playwright_mcp_version` | no | `"0.0.84"` | Version of `@playwright/mcp`. |
 | `platform_ref` | no | `""` | Optional ref override, as in `test-and-heal.yml`. Empty uses the commit of the called workflow. |
@@ -272,8 +299,10 @@ shown on the workflow run's **Summary** page:
 | Workflow | Job | When |
 |---|---|---|
 | `test-and-heal.yml` | `test` | After every test run, whether the tests passed or not. |
-| `test-and-heal.yml` | `heal` | After triage, with a **Triage** column: each failure's classification and reason. |
+| `test-and-heal.yml` | `triage` | After triage, with a **Triage** column: each failure's classification and reason. |
 | `generate-tests.yml` | `generate` | After the generated tests run. |
+
+The `report-defects` job adds a **Defects reported** section of its own (see [Defect reporting](#defect-reporting)).
 
 Each summary shows:
 - a header with the framework and the tested commit;
@@ -283,7 +312,7 @@ Each summary shows:
 - "No tests found" when no report matches the framework's `report_glob`.
 
 Failed tests are matched to the entries of `results/triage.json` by name and classname, or by name alone when
-that is unambiguous; a test without an entry shows "not triaged". The `heal` job reads a fresh download of the
+that is unambiguous; a test without an entry shows "not triaged". The `triage` job reads a fresh download of the
 `test-results` artifact, because a test re-run during triage can overwrite the reports in the workspace.
 
 The summary never fails a job: the script always exits 0. A report or triage file it can't parse is skipped, and a
@@ -294,6 +323,54 @@ To preview it, run it from the repository under test. Without `GITHUB_STEP_SUMMA
 ```bash
 FRAMEWORK=playwright bash .agentic-qa/scripts/write-summary.sh 'results/*.xml' results/triage.json
 ```
+
+## Defect reporting
+
+When triage classifies a failure as `REAL_BUG`, the `report-defects` job files it as a GitHub issue, or comments on
+the open issue if the same failure was reported before. Turn it off with `report_defects: false`.
+
+1. **Candidates.** `scripts/report-defects.sh prepare` picks the `REAL_BUG` items from `results/triage.json`,
+   matches them to `results/failures.json` and writes `results/defect-candidates.json`. Each failure gets a
+   fingerprint, a slug, the failing step (`file:line`) and the error. The file also gives the commit, app URL,
+   framework, engine, model and run URL.
+2. **Reports.** The *defect-reporter* agent writes `results/defects/<slug>.md` for each candidate, from the test
+   code, the triage evidence and, where it helps, the live app. The first line is
+   `<!-- agentic-qa-defect: <fingerprint> -->`, and the title is
+   `[Agentic QA] <short behaviour summary> (<test name>)`. The sections are:
+   - Summary;
+   - Expected vs Actual;
+   - Steps to reproduce, in plain language, taken from the test code;
+   - Evidence: the error and `file:line`;
+   - Triage reasoning;
+   - Environment: commit, app URL, framework, engine and model;
+   - Links: the workflow run and the artifact names.
+3. **Issues.** `scripts/report-defects.sh publish` (no AI) handles each report:
+   - It looks for an open issue labelled `agentic-qa` that carries the fingerprint:
+     `gh issue list --search "<fingerprint> in:body"`. GitHub search can lag behind new issues, so it also checks
+     the bodies of the 200 newest open `agentic-qa` issues.
+   - If it finds one, it comments `Still failing on <sha> — <run url>`.
+   - Otherwise it opens an issue with `defect_labels` and `defect_assignees`. Missing labels are created, and
+     `agentic-qa` is always added. If GitHub rejects the assignees, the issue is opened unassigned.
+   - It writes `results/defects-report.json` (created and updated issues with their numbers and URLs, plus
+     failures) and a **Defects reported** section in the job summary. A `gh` call that fails is reported there
+     and never fails the job.
+
+The candidates, the reports and `results/defects-report.json` are uploaded as the `defects` artifact.
+
+**Fingerprint.** `sha1("<test file>\n<test name>\n<first error line>")`, computed by the script, not the agent. The
+error line comes from `results/failures.json`. UUIDs, `0x…` values, hex ids (7 or more hex characters with a digit
+and a letter) and numbers are removed from it, and whitespace is collapsed. So the same failure keeps its fingerprint
+when timings, ports, ids or line numbers change, and a different assertion gets a new one. If the test file is
+unknown, its classname is used. Changing this definition changes every fingerprint, and open issues stop matching.
+
+**Guardrails:**
+- The agent has `Read`, `Write`, `Glob`, `Grep` and the browser; no `Bash` or `Edit`, on either engine.
+- If any file outside `results/defects/` changed while the agent ran, the job fails before an issue is opened.
+- Only the candidates' reports are published, and the script, not the agent, writes the fingerprint line. Other
+  files in `results/defects/` are ignored, so a confused or manipulated agent can't open extra issues.
+- `@mentions` outside code get a zero-width space after the `@`, so a report can't notify anyone.
+- In a public repository, issues are public. The agent is told never to include secrets, and `app_url` should be a
+  test environment anyway (see [Security](#security)).
 
 ## Spec sources
 
@@ -412,6 +489,8 @@ Every rule has `pass-*` and `fail-*` fixtures in `tests/anti-cheat/`. The script
 - The job fails if an agent modified the platform checkout (`.agentic-qa/`), because anti-cheat would then be
   running modified code.
 - The job fails if the pr-writer changed any file after anti-cheat ran.
+- The `report-defects` job fails, before any issue is opened, if the defect-reporter changed any file outside
+  `results/defects/`, including the platform checkout and `results/defect-candidates.json`.
 - The staged files of both engines and the run artefacts are listed in `.git/info/exclude`. Staged files:
   `.claude/agents/*`, `.claude/settings.json`, `.mcp.json`, `.opencode/` (which holds the staged `agents/`),
   `AGENTS.md`, `opencode.json`. Run
@@ -438,6 +517,10 @@ These are **not** detected by the script and must be checked by the reviewer (th
   exposed to the agent and cap what it can spend.
 - **Only maintainers should be able to apply the `ready-for-tests` label.** Issue and ticket text become agent
   input, so don't grant the triage role broadly, and review an issue before labelling it.
+- **Defect reports become issues, which are public in a public repository.** Only the `report-defects` job gets
+  `issues: write`, and its agent can't run commands. Issues are opened only for the failures triage classified as
+  `REAL_BUG`, `@mentions` are defused, and the agent is told never to include secrets. Still, read what a report
+  contains, such as error messages, URLs and test data, before you make a private project's repository public.
 - **Bash is restricted on both engines.** Agents can run only:
   - `npx playwright test`, `npx playwright install`, `npx cypress run`, `mvn`, `pytest`;
   - `git status`, `git diff`, `git log`;
@@ -461,7 +544,8 @@ These are **not** detected by the script and must be checked by the reviewer (th
   used, including `create-pull-request@v8`, run on Node 24).
 - Pull requests opened with the default `GITHUB_TOKEN` don't trigger other workflows. Re-run CI on them
   manually, or switch the action to a GitHub App token.
-- The artifact name `test-results` is fixed, so call `test-and-heal.yml` once per workflow run.
+- The artifact names `test-results`, `triage`, `auto-heal-results` and `defects` are fixed, so call
+  `test-and-heal.yml` once per workflow run.
 - To run an agent locally, run these from the repository under test with the platform checked out in
   `.agentic-qa/`:
   1. `ENGINE=claude FRAMEWORK=playwright bash .agentic-qa/scripts/stage-agents.sh` (or `ENGINE=opencode`)
@@ -476,8 +560,12 @@ These are **not** detected by the script and must be checked by the reviewer (th
   - `write-summary.sh`: the same sample reports, an edge-case report and a triage file must produce the markdown in
     `tests/write-summary/*.expected.md`, and missing or broken input must still exit 0;
   - `fetch-spec.sh`: the Spec Kit folder must produce `003-feature.expected.md`;
-  - `stage-agents.sh`: staging is checked for both engines;
-  - `run-agent.sh`: the command lines are checked with stub `claude` / `opencode` executables.
+  - `stage-agents.sh`: staging is checked for both engines, including the tools each agent may use;
+  - `run-agent.sh`: the command lines are checked with stub `claude` / `opencode` executables;
+  - `report-defects.sh`: `prepare` must produce `defect-candidates.expected.json`, and fingerprints must match
+    their definition, stay the same when timings, ids and line numbers change, and change with the error;
+    `publish` runs against a stub `gh` (new issues, a comment on an open issue, failed `gh` calls, missing and
+    stray reports) and must always exit 0.
 - `.github/workflows/ci.yml` runs on every push and pull request:
   - `shellcheck` on the scripts;
   - `actionlint` on the workflows;

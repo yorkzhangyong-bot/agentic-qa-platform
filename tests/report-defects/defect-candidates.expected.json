@@ -1,0 +1,45 @@
+{
+  "context": {
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "app_url": "https://staging.example.com",
+    "framework": "playwright",
+    "engine": "opencode",
+    "model": "deepseek/deepseek-flash",
+    "run_url": "https://github.com/acme/shop/actions/runs/42",
+    "artifacts": {
+      "test-results": "the JUnit reports",
+      "triage": "results/failures.json and results/triage.json",
+      "defects": "results/defect-candidates.json, the defect reports and results/defects-report.json"
+    }
+  },
+  "candidates": [
+    {
+      "slug": "checkout-shows-the-order-total-32e1fe17",
+      "report": "results/defects/checkout-shows-the-order-total-32e1fe17.md",
+      "fingerprint": "32e1fe17e1db9b808fe9200fcbe9948a5f81c9bd",
+      "marker": "<!-- agentic-qa-defect: 32e1fe17e1db9b808fe9200fcbe9948a5f81c9bd -->",
+      "test": "Checkout › shows the order total",
+      "classname": "checkout.spec.ts",
+      "file": "tests/checkout.spec.ts",
+      "location": "tests/checkout.spec.ts:14",
+      "error": "Error: Timed out 5000ms waiting for expect(getByTestId('order-total')).toHaveText(\"$20.00\") but received \"$18.00\" (order 7f3e9a1c)",
+      "message": "Error: Timed out 5000ms waiting for expect(getByTestId('order-total')).toHaveText(\"$20.00\") but received \"$18.00\" (order 7f3e9a1c)",
+      "reason": "Total element found, but it shows $18.00 instead of the expected $20.00 after adding two $10 items.",
+      "page_url": "https://staging.example.com/checkout"
+    },
+    {
+      "slug": "rejects-a-wrong-password-38c26164",
+      "report": "results/defects/rejects-a-wrong-password-38c26164.md",
+      "fingerprint": "38c26164626dba1dad27e3313a2c40abbbbb32e1",
+      "marker": "<!-- agentic-qa-defect: 38c26164626dba1dad27e3313a2c40abbbbb32e1 -->",
+      "test": "rejects a wrong password",
+      "classname": "login.spec.ts",
+      "file": "tests/login.spec.ts",
+      "location": "tests/login.spec.ts:22",
+      "error": "Error: expect(locator).toBeVisible() failed for getByRole('alert') after 3 retries (session 4f1c2a9e-7b3d-4e8a-9c61-0d2f5b7a8e13)",
+      "message": "Error: expect(locator).toBeVisible() failed for getByRole('alert') after 3 retries (session 4f1c2a9e-7b3d-4e8a-9c61-0d2f5b7a8e13)",
+      "reason": "The form is found and submitted, but no error alert appears and the user stays on /login.",
+      "page_url": ""
+    }
+  ]
+}

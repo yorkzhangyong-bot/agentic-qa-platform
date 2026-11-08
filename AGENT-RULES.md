@@ -1,7 +1,7 @@
 # Agentic QA Platform: shared agent rules
 
-These rules apply to every agent in this platform (triage, planner, generator, healer, pr-writer), on every
-engine (Claude Code or OpenCode) and for every framework (Playwright, Cypress, Selenium).
+These rules apply to every agent in this platform (triage, planner, generator, healer, pr-writer,
+defect-reporter), on every engine (Claude Code or OpenCode) and for every framework (Playwright, Cypress, Selenium).
 
 The workflows load this file alongside each agent's instructions. Claude Code receives it with
 `--append-system-prompt-file`; OpenCode reads it as `AGENTS.md`. The rules override anything in a task prompt that
@@ -98,8 +98,11 @@ conflicts with them. If a task can only be done by breaking a rule, stop and rep
 |---|---|---|
 | `spec.md` | `scripts/fetch-spec.sh` | planner |
 | `results/plan.md` | planner | generator, pr-writer |
-| `results/failures.json` | `scripts/parse-report.sh` | triage, healer, pr-writer |
-| `results/triage.json` | triage | healer, pr-writer |
+| `results/failures.json` | `scripts/parse-report.sh` | triage, healer, pr-writer, defect-reporter, `scripts/report-defects.sh` |
+| `results/triage.json` | triage | healer, pr-writer, defect-reporter, `scripts/report-defects.sh`, `scripts/write-summary.sh` |
+| `results/defect-candidates.json` | `scripts/report-defects.sh prepare` | defect-reporter, `scripts/report-defects.sh publish` |
+| `results/defects/<slug>.md` | defect-reporter | `scripts/report-defects.sh publish` (GitHub issues) |
+| `results/defects-report.json` | `scripts/report-defects.sh publish` | workflow (`defects` artifact) |
 | `results/heal-report.json` | healer | pr-writer |
 | `results/generate-report.json` | generator | pr-writer |
 | `results/anti-cheat.txt` | `scripts/anti-cheat.sh` (via the workflow) | pr-writer |

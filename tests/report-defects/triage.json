@@ -1,0 +1,31 @@
+{
+  "framework": "playwright",
+  "summary": { "SELECTOR_DRIFT": 1, "REAL_BUG": 2, "FLAKY": 0, "ENV": 0 },
+  "items": [
+    {
+      "name": "Checkout › shows the order total",
+      "classname": "checkout.spec.ts",
+      "file": "tests/checkout.spec.ts",
+      "classification": "REAL_BUG",
+      "reason": "Total element found, but it shows $18.00 instead of the expected $20.00 after adding two $10 items.",
+      "page_url": "https://staging.example.com/checkout"
+    },
+    {
+      "name": "Checkout › applies a coupon",
+      "classname": "checkout.spec.ts",
+      "file": "tests/checkout.spec.ts",
+      "classification": "SELECTOR_DRIFT",
+      "reason": "Timed out on getByTestId('apply-coupon'); the same Apply button now has data-testid='coupon-apply'.",
+      "broken_locator": "getByTestId('apply-coupon')",
+      "suggested_locator": "getByTestId('coupon-apply')",
+      "page_url": "https://staging.example.com/checkout"
+    },
+    {
+      "name": "rejects a wrong password",
+      "classname": "login.spec.ts",
+      "file": "tests/login.spec.ts",
+      "classification": "REAL_BUG",
+      "reason": "The form is found and submitted, but no error alert appears and the user stays on /login."
+    }
+  ]
+}
