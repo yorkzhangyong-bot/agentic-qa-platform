@@ -19,6 +19,11 @@
 #                    defect-candidates.expected.json; fingerprints must match their definition, survive other timings,
 #                    ids and line numbers, and change with the error. publish runs with a stub `gh`: new issues, a
 #                    comment on an open issue, failed gh calls (never a failed run), missing and stray reports.
+#   load-app-env.sh  Each tests/load-app-env/<name>.env is passed as APP_ENV: "# expect: ok" fixtures must produce
+#                    <name>.expected in $GITHUB_ENV with every value masked; "# expect: error on line N…" fixtures
+#                    must fail naming those lines and load nothing. No value may be printed outside ::add-mask::.
+#                    Also: CRLF, empty values, % in masks, -- COMMAND, --check, and a guard that no agent step and
+#                    no job-wide env in the workflows gets APP_ENV.
 #
 # Usage: bash tests/run-tests.sh          (exit code 0 when every check passes)
 set -euo pipefail
@@ -120,8 +125,8 @@ summary_run() {  # summary_run <framework> <arg>...: run write-summary.sh in the
   rm -f "$summary"
   set +e
   (cd "$project" && env GITHUB_STEP_SUMMARY="$summary" FRAMEWORK="$1" COMMIT_SHA=0123456789abcdef0123456789abcdef01234567 \
-    GITHUB_SERVER_URL=https://github.com GITHUB_REPOSITORY=acme/shop bash "$root/scripts/write-summary.sh" "${@:2}" \
-    > "$work/summary.log" 2>&1)
+    GITHUB_SERVER_URL=https://github.com GITHUB_REPOSITORY=acme/shop SUMMARY_TITLE="${SUMMARY_TITLE:-}" \
+    bash "$root/scripts/write-summary.sh" "${@:2}" > "$work/summary.log" 2>&1)
   code=$?
   set -e
 }
@@ -189,6 +194,9 @@ summary_run playwright 'results/*.xml' "$work/triage-broken.json"
 summary_check unparsable-triage "+could not read the triage file" "+| Checkout " "-| Triage |"
 summary_run playwright 'results/*.xml' "$work/no-such-triage.json"
 summary_check missing-triage "+No triage results" "-| Triage |"
+summary_reports "$root/tests/parse-report/passing.xml"
+SUMMARY_TITLE="Test results after healing" summary_run playwright 'results/*.xml'
+summary_check custom-title "+## Test results after healing: playwright @"
 set +e
 (cd "$project" && env GITHUB_STEP_SUMMARY="$work/no-such-dir/summary.md" bash "$root/scripts/write-summary.sh" \
   'results/*.xml' > "$work/summary.log" 2>&1)
@@ -506,6 +514,123 @@ rm "$defects/results/defects/rejects-a-wrong-password-"*.md
 printf '# [Agentic QA] Not a candidate\n' > "$defects/results/defects/rogue.md"
 defects_publish
 check_texts missing-and-stray-reports "$transcript" "+**no report**" "+rogue.md" "-Not a candidate" "+\"missing\": ["
+
+echo
+echo "load-app-env.sh"
+github_env="$work/github_env"
+app_env_out="$work/app-env.out"
+load_env() {  # load_env [VAR=value]... -- [ARG]...: run load-app-env.sh ARGs in a clean environment; sets $code
+  local vars=()
+  while [ "$1" != -- ]; do vars+=("$1"); shift; done
+  shift
+  rm -f "$github_env"
+  set +e
+  env -u APP_ENV GITHUB_ACTIONS=true GITHUB_ENV="$github_env" "${vars[@]}" bash "$root/scripts/load-app-env.sh" "$@" \
+    > "$app_env_out" 2>&1
+  code=$?
+  set -e
+}
+env_check() {  # env_check <name> <exit> <GITHUB_ENV content, or none> <+present|-absent>...: about the last load_env
+  local name="$1" want="$2" expected="$3" problems="" item
+  shift 3
+  [ "$code" -eq "$want" ] || problems+="exit $code, want $want"$'\n'
+  if [ "$expected" = none ]; then
+    [ ! -e "$github_env" ] || problems+="GITHUB_ENV was written"$'\n'
+  elif [ "$(cat "$github_env" 2> /dev/null)" != "$expected" ]; then
+    problems+="GITHUB_ENV holds:"$'\n'"$(cat "$github_env" 2> /dev/null)"$'\n'
+  fi
+  for item in "$@"; do
+    if grep -qF -- "${item:1}" "$app_env_out"; then
+      [ "${item:0:1}" = + ] || problems+="printed: ${item:1}"$'\n'
+    else
+      [ "${item:0:1}" = - ] || problems+="missing: ${item:1}"$'\n'
+    fi
+  done
+  if [ -z "$problems" ]; then ok "$name"; else bad "$name" "$problems$(cat "$app_env_out")"; fi
+}
+for fixture in "$root"/tests/load-app-env/*.env; do
+  name="$(basename "$fixture" .env)"
+  expect="$(sed -n 's/^# expect: //p' "$fixture")"
+  load_env APP_ENV="$(cat "$fixture")" --
+  problems=""
+  # No value, and no malformed line, may be printed anywhere but in an ::add-mask:: line.
+  while IFS= read -r secret; do
+    if [ -n "$secret" ] && grep -vF '::add-mask::' "$app_env_out" | grep -qF -- "$secret"; then
+      problems+="printed: $secret"$'\n'
+    fi
+  done < <(grep -v '^[[:space:]]*#' "$fixture" | sed -e 's/^[[:space:]]*//' -e 's/^[^=]*=//')
+  if [ "$expect" = ok ]; then
+    [ "$code" -eq 0 ] || problems+="exit $code, want 0"$'\n'
+    cmp -s "$github_env" "${fixture%.env}.expected" \
+      || problems+="GITHUB_ENV differs from $name.expected:"$'\n'"$(cat "$github_env" 2> /dev/null)"$'\n'
+    while IFS= read -r value; do
+      if [ -n "$value" ] && ! grep -qxF "::add-mask::$value" "$app_env_out"; then problems+="not masked: $value"$'\n'; fi
+    done < <(sed 's/^[^=]*=//' "${fixture%.env}.expected")
+  else
+    [ "$code" -eq 1 ] || problems+="exit $code, want 1"$'\n'
+    [ ! -e "$github_env" ] || problems+="GITHUB_ENV was written although the input was rejected"$'\n'
+    if grep -q '::add-mask::' "$app_env_out"; then problems+="masked values of a rejected input"$'\n'; fi
+    read -r -a line_numbers <<< "${expect#error on line }"
+    for line_number in "${line_numbers[@]}"; do
+      grep -q "APP_ENV line $line_number " "$app_env_out" || problems+="no error for line $line_number"$'\n'
+    done
+  fi
+  if [ -z "$problems" ]; then ok "$name"; else bad "$name" "$problems$(cat "$app_env_out")"; fi
+done
+load_env APP_ENV="$(cat "$root/tests/load-app-env/valid.env")" GITHUB_ACTIONS= --
+env_check no-masks-outside-github-actions 0 "$(cat "$root/tests/load-app-env/valid.expected")" "-::add-mask::" \
+  "-sk-or-v1-fixture-7f3e9a1c4b2d"
+load_env APP_ENV=$'CRLF_SECRET=fixture-crlf-value-5e6f7a\r\nEMPTY_ONE=\r\n' --
+env_check crlf-and-empty-value 0 $'CRLF_SECRET=fixture-crlf-value-5e6f7a\nEMPTY_ONE=' \
+  "+::add-mask::fixture-crlf-value-5e6f7a" "+APP_ENV line 2 sets EMPTY_ONE to an empty value"
+load_env APP_ENV='PCT_SECRET=fixture%25pct%0Avalue' --
+env_check percent-escaped-in-mask 0 'PCT_SECRET=fixture%25pct%0Avalue' "+::add-mask::fixture%2525pct%250Avalue"
+load_env APP_ENV='APP_TOKEN=fixture-exec-token=x' GITHUB_ACTIONS= -- -- printenv APP_TOKEN
+env_check command-gets-the-values 0 none "+fixture-exec-token=x"
+load_env APP_ENV='APP_TOKEN=fixture-exec-token=x' -- -- printenv APP_ENV
+env_check command-does-not-get-app-env 1 none "+::add-mask::fixture-exec-token=x" "-APP_TOKEN"
+load_env --
+env_check empty-app-env-loads-nothing 0 none "-load-app-env" "-::"
+load_env APP_ENV="$(cat "$root/tests/load-app-env/valid.env")" -- --check
+env_check check-masks-without-loading 0 none "+::add-mask::sk-or-v1-fixture-7f3e9a1c4b2d" "+APP_ENV is valid"
+load_env APP_ENV='not a valid line' -- --check
+env_check check-rejects-malformed-input 1 none "+APP_ENV line 1 " "-not a valid line"
+load_env -- --bogus
+env_check usage-error 2 none "+usage:"
+# The workflows themselves: no job-wide APP_ENV, no agent step with it, no $GITHUB_ENV loading in a job with agents.
+if python3 - "$root/.github/workflows" > "$work/app-env-guard.log" 2>&1 <<'PY'
+import pathlib
+import re
+import sys
+
+problems = []
+for path in sorted(pathlib.Path(sys.argv[1]).glob("*.yml")):
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith("#")]
+    text = "\n".join(lines) + "\n"
+    if "\njobs:\n" not in text:
+        continue
+    for job in re.split(r"(?m)^  (?=[\w-]+:\s*$)", text.split("\njobs:\n", 1)[1])[1:]:
+        name = job.split(":", 1)[0]
+        head, _, steps = job.partition("\n    steps:\n")
+        if "secrets.APP_ENV" in head:
+            problems.append(f"{path.name} {name}: APP_ENV is set for the whole job")
+        agents = "run-agent.sh" in steps
+        for step in re.split(r"(?m)^      - ", steps)[1:]:
+            if "secrets.APP_ENV" not in step:
+                continue
+            title = step.splitlines()[0]
+            if "run-agent.sh" in step:
+                problems.append(f"{path.name} {name}: the agent step '{title}' gets APP_ENV")
+            elif agents and not re.search(r'load-app-env\.sh"? (--check|--)( |$)', step, re.M):
+                problems.append(f"{path.name} {name}: '{title}' loads APP_ENV into GITHUB_ENV in a job with agents")
+print("\n".join(problems))
+sys.exit(1 if problems else 0)
+PY
+then
+  ok "agents-never-get-app-env"
+else
+  bad "agents-never-get-app-env" "$(cat "$work/app-env-guard.log")"
+fi
 
 echo
 echo "$passed passed, $failed failed"

@@ -20,6 +20,8 @@ invent results. If an input is missing, say so in the PR body.
   - `results/triage.json`: the classification and a one-line reason for each failure.
   - `results/heal-report.json`: what the healer changed, before/after locators, the 3 re-run results, and
     reverts.
+  - `results/verify-failures.json`: the tests that still failed in the workflow's verification run after healing
+    (an empty list means it passed). Unlike the healer's runs, that run had the app's own environment (`APP_ENV`).
 - **Auto-generate results:** `spec.md`, `results/plan.md` and `results/generate-report.json` (the spec, the
   scenarios, and what the generator built).
 - **`results/anti-cheat.txt`:** the guardrail report.
@@ -42,7 +44,8 @@ Use this structure:
    - Auto-heal: one row per item in `heal-report.json`.
    - Auto-generate: list the new locators and how each was confirmed against the live app.
 5. **Re-run results.** The healer's stability runs (e.g. `3/3 passed`) and the workflow's test outcome. List
-   anything that still fails.
+   anything that still fails. In an auto-heal run, the workflow's outcome is its verification run after healing;
+   if it disagrees with the healer's runs, say so.
 6. **⚠️ Needs human attention.** Include:
    - every `REAL_BUG` item, with its evidence;
    - generated scenarios marked `possible_bug`;

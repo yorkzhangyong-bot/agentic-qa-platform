@@ -29,3 +29,7 @@ jobs:
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       # DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      # The app's own secrets for the test runs, one KEY=value per line; never given to the agents. Use repository
+      # secrets: secrets stored under a GitHub Environment aren't visible to reusable workflows.
+      # APP_ENV: |
+      #   OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}

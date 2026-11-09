@@ -99,6 +99,9 @@ on:
       PLATFORM_TOKEN:
         description: Optional token with read access to agentic-qa-platform (only needed if it is private).
         required: false
+      APP_ENV:
+        description: Optional. The app's own variables for the test runs, one KEY=value per line (e.g. its API keys). Loaded only into the test run after generation, never into agent steps. Use repository secrets; secrets of a GitHub Environment aren't visible to reusable workflows.
+        required: false
     outputs:
       pr_url:
         description: URL of the auto-generate pull request, if one was opened.
@@ -194,6 +197,13 @@ jobs:
           token: ${{ secrets.PLATFORM_TOKEN || github.token }}
           path: .agentic-qa
           persist-credentials: false
+
+      # Fails fast on a malformed APP_ENV and masks its values in this job's logs, before any agent runs. Only the
+      # test run after generation gets the values.
+      - name: Check APP_ENV
+        env:
+          APP_ENV: ${{ secrets.APP_ENV }}
+        run: bash "$PLATFORM_DIR/scripts/load-app-env.sh" --check
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -293,6 +303,8 @@ jobs:
         id: run
         continue-on-error: true
         env:
+          # The agents in this job never get APP_ENV: load-app-env.sh puts the values into the test command only.
+          APP_ENV: ${{ secrets.APP_ENV }}
           RUN_CMD: ${{ needs.config.outputs.run }}
           FRAMEWORK_ENV: ${{ needs.config.outputs.env }}
           REPORT_GLOB: ${{ needs.config.outputs.report_glob }}
@@ -305,7 +317,7 @@ jobs:
           eval "$(jq -r 'to_entries[] | "export \(.key)=\(.value | tostring | @sh)"' <<< "$env_json")"
           if [ -n "$APP_URL" ]; then export BASE_URL="$APP_URL" CYPRESS_BASE_URL="$APP_URL"; fi
           echo "+ $RUN_CMD"
-          bash -c "$RUN_CMD"
+          bash "$PLATFORM_DIR/scripts/load-app-env.sh" -- bash -c "$RUN_CMD"
 
       - name: Test results summary
         if: always()

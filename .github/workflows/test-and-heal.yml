@@ -102,6 +102,9 @@ on:
       PLATFORM_TOKEN:
         description: Optional token with read access to agentic-qa-platform (only needed if it is private).
         required: false
+      APP_ENV:
+        description: Optional. The app's own variables for the test runs, one KEY=value per line (e.g. its API keys). Loaded only into test runs, never into agent steps. Use repository secrets; secrets of a GitHub Environment aren't visible to reusable workflows.
+        required: false
     outputs:
       failed:
         description: "'true' if the test run failed."
@@ -189,6 +192,12 @@ jobs:
             bash -c "$cmd" < /dev/null
             echo "::endgroup::"
           done <<< "$INSTALL_SCRIPT"
+
+      # This job runs no agent, so the app's variables can go to $GITHUB_ENV for the steps below.
+      - name: Load the app environment (APP_ENV)
+        env:
+          APP_ENV: ${{ secrets.APP_ENV }}
+        run: bash .agentic-qa/scripts/load-app-env.sh
 
       - name: Run tests
         id: run
@@ -501,6 +510,12 @@ jobs:
           name: triage
           path: results
 
+      # Masks the APP_ENV values in this job's logs before any agent runs. Only the verification run gets the values.
+      - name: Check APP_ENV
+        env:
+          APP_ENV: ${{ secrets.APP_ENV }}
+        run: bash "$PLATFORM_DIR/scripts/load-app-env.sh" --check
+
       - name: Install agent engine
         env:
           CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
@@ -538,17 +553,6 @@ jobs:
             .agentic-qa/frameworks/${{ inputs.framework }}.json. App URL: ${{ inputs.app_url || 'not provided' }}.
         run: bash "$PLATFORM_DIR/scripts/run-agent.sh"
 
-      - name: Anti-cheat
-        env:
-          FORBIDDEN_PATHS: ${{ needs.config.outputs.forbidden_paths_csv }}
-        run: |
-          set -o pipefail
-          if [ "$(git -C "$PLATFORM_DIR" rev-parse HEAD)" != "$PLATFORM_SHA" ] || [ -n "$(git -C "$PLATFORM_DIR" status --porcelain)" ]; then
-            echo "::error::Files in .agentic-qa/ were modified during the agent run, so anti-cheat.sh cannot be trusted."
-            exit 1
-          fi
-          bash "$PLATFORM_DIR/scripts/anti-cheat.sh" "$FORBIDDEN_PATHS" "$BASE_SHA" | tee results/anti-cheat.txt
-
       - name: Detect test changes
         id: changes
         run: |
@@ -562,6 +566,52 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # The healer's own runs don't get APP_ENV, because agents never see the app's secrets. This run does, in this
+      # step only, so the healed suite also runs against the app as the test job ran it. It runs before anti-cheat, so
+      # anti-cheat also checks any file it writes. Its result goes to the job summary and the PR writer; it doesn't
+      # block the pull request.
+      - name: Verify healed tests
+        id: verify
+        if: steps.changes.outputs.changed == 'true'
+        continue-on-error: true
+        env:
+          APP_ENV: ${{ secrets.APP_ENV }}
+          RUN_CMD: ${{ needs.config.outputs.run }}
+          FRAMEWORK_ENV: ${{ needs.config.outputs.env }}
+          REPORT_GLOB: ${{ needs.config.outputs.report_glob }}
+        run: |
+          shopt -s globstar nullglob
+          for f in $REPORT_GLOB; do rm -f -- "$f"; done   # drop the reports of the healer's own runs
+          mkdir -p results
+          env_json="${FRAMEWORK_ENV:-}"
+          [ -n "$env_json" ] || env_json='{}'
+          eval "$(jq -r 'to_entries[] | "export \(.key)=\(.value | tostring | @sh)"' <<< "$env_json")"
+          if [ -n "$APP_URL" ]; then export BASE_URL="$APP_URL" CYPRESS_BASE_URL="$APP_URL"; fi
+          echo "+ $RUN_CMD"
+          bash "$PLATFORM_DIR/scripts/load-app-env.sh" -- bash -c "$RUN_CMD"
+
+      - name: Verification results
+        if: always() && steps.verify.outcome != 'skipped'
+        continue-on-error: true   # the summary must never fail the job
+        env:
+          REPORT_GLOB: ${{ needs.config.outputs.report_glob }}
+          COMMIT_SHA: ${{ needs.test.outputs.sha }}
+          SUMMARY_TITLE: Test results after healing
+        run: |
+          bash "$PLATFORM_DIR/scripts/write-summary.sh" "$REPORT_GLOB"
+          FAILURES_OUT=results/verify-failures.json bash "$PLATFORM_DIR/scripts/parse-report.sh" "$REPORT_GLOB"
+
+      - name: Anti-cheat
+        env:
+          FORBIDDEN_PATHS: ${{ needs.config.outputs.forbidden_paths_csv }}
+        run: |
+          set -o pipefail
+          if [ "$(git -C "$PLATFORM_DIR" rev-parse HEAD)" != "$PLATFORM_SHA" ] || [ -n "$(git -C "$PLATFORM_DIR" status --porcelain)" ]; then
+            echo "::error::Files in .agentic-qa/ were modified during the agent run, so anti-cheat.sh cannot be trusted."
+            exit 1
+          fi
+          bash "$PLATFORM_DIR/scripts/anti-cheat.sh" "$FORBIDDEN_PATHS" "$BASE_SHA" | tee results/anti-cheat.txt
+
       - name: Write PR description (pr-writer agent)
         if: steps.changes.outputs.changed == 'true'
         env:
@@ -574,7 +624,8 @@ jobs:
           EXPECTED_OUTPUT: PR_BODY.md
           PROMPT: >-
             Write PR_BODY.md for this auto-heal run as described in your instructions. Framework: ${{ inputs.framework }}.
-            Test dir: ${{ env.TEST_DIR }}. Read results/failures.json, results/triage.json, results/heal-report.json,
+            Test dir: ${{ env.TEST_DIR }}. Verification run after healing, with the app's APP_ENV: ${{ steps.verify.outcome }}.
+            Read results/failures.json, results/triage.json, results/heal-report.json, results/verify-failures.json,
             results/anti-cheat.txt and the git diff.
         run: |
           fingerprint() { { git diff HEAD --binary; git ls-files --others --exclude-standard -z | xargs -0 -r sha256sum; } | sha256sum; }

@@ -8,6 +8,7 @@
 # Environment:
 #   GITHUB_STEP_SUMMARY  file the markdown is appended to (set by GitHub Actions); if unset, it is printed
 #   FRAMEWORK            framework name for the header
+#   SUMMARY_TITLE        header text (default "Test results"), e.g. "Test results after healing"
 #   COMMIT_SHA           tested commit for the header (default $GITHUB_SHA); linked when GITHUB_SERVER_URL and
 #                        GITHUB_REPOSITORY are set
 # Output: a header with the framework and commit, a counts line (total, passed, failed, skipped, duration) and a
@@ -246,7 +247,7 @@ def duration_text(total):
 
 
 def header():
-    title = "Test results"
+    title = md(os.environ.get("SUMMARY_TITLE", "")) or "Test results"
     framework = one_line(os.environ.get("FRAMEWORK", ""))
     if framework:
         title += f": {md(framework)}"

@@ -78,12 +78,12 @@ test-and-heal.yml
                                                └──(REAL_BUG)────────► report-defects
 
   config          _select-framework.yml validates the engine and reads frameworks/<framework>.json
-  test            check out the commit, install, run tests, write-summary.sh, upload "test-results"
+  test            check out the commit, install, load-app-env.sh, run tests, write-summary.sh, upload "test-results"
   triage          check out the same commit, parse-report.sh → results/failures.json, stage-agents.sh,
                   run-agent.sh triage → results/triage.json, write-summary.sh (with the classifications),
                   upload "triage"
-  heal            run-agent.sh healer → results/heal-report.json, anti-cheat.sh,
-                  run-agent.sh pr-writer → PR_BODY.md, open PR auto-heal/<run_id>
+  heal            run-agent.sh healer → results/heal-report.json, verification run (with APP_ENV),
+                  anti-cheat.sh, run-agent.sh pr-writer → PR_BODY.md, open PR auto-heal/<run_id>
                   (or update + comment on the open auto-heal PR)
   report-defects  report-defects.sh prepare → results/defect-candidates.json,
                   run-agent.sh defect-reporter → results/defects/<slug>.md,
@@ -93,7 +93,7 @@ generate-tests.yml
   config ──► generate: fetch-spec.sh → spec.md
                        stage-agents.sh → run-agent.sh planner → results/plan.md
                        run-agent.sh generator → tests + results/generate-report.json
-                       run tests → write-summary.sh → anti-cheat.sh
+                       run tests (with APP_ENV) → write-summary.sh → anti-cheat.sh
                        run-agent.sh pr-writer → PR auto-generate/<run_id>
 ```
 
@@ -105,6 +105,8 @@ generate-tests.yml
   triage has run (see [Job summary](#job-summary)).
 - **`scripts/report-defects.sh`** turns `REAL_BUG` failures into GitHub issues, without AI: `prepare` computes
   each failure's fingerprint, `publish` opens or updates the issues (see [Defect reporting](#defect-reporting)).
+- **`scripts/load-app-env.sh`** loads the consumer's `APP_ENV` secret into the test runs, never into an agent step
+  (see [App secrets](#app-secrets-app_env)).
 
 ## Agent engines
 
@@ -166,12 +168,14 @@ OpenCode's known gaps:
 │   ├── anti-cheat.sh            fails on forbidden paths, weakened assertions, skips, sleeps, long timeouts
 │   ├── stage-agents.sh          stages agents, rules, permissions and MCP config for ENGINE=claude|opencode
 │   ├── run-agent.sh             runs one agent on the selected engine, checks its expected output
-│   └── report-defects.sh        REAL_BUG failures → fingerprinted candidates → GitHub issues (no AI)
+│   ├── report-defects.sh        REAL_BUG failures → fingerprinted candidates → GitHub issues (no AI)
+│   └── load-app-env.sh          APP_ENV secret → the test runs' environment, never an agent's
 ├── tests/                       fixture tests for the scripts (bash tests/run-tests.sh)
 │   ├── anti-cheat/              base/ sample project + *.diff fixtures (pass-* and fail-*)
 │   ├── parse-report/            Playwright, Cypress, Surefire XML + expected JSON
 │   ├── write-summary/           edge-case XML, triage.json + expected markdown
 │   ├── report-defects/          triage + failures fixtures, expected candidates, sample defect reports
+│   ├── load-app-env/            APP_ENV fixtures (*.env) + expected $GITHUB_ENV
 │   └── fetch-spec/              Spec Kit folder fixture + expected spec.md
 ├── .github/workflows/
 │   ├── _select-framework.yml    validates the engine, reads frameworks/<framework>.json → outputs
@@ -201,7 +205,8 @@ OpenCode's known gaps:
    - `ANTHROPIC_API_KEY` for `engine: claude`, the default;
    - for `engine: opencode`, one of `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY` or `OPENAI_API_KEY`.
 
-   Also add `JIRA_TOKEN` if you generate tests from Jira.
+   Also add `JIRA_TOKEN` if you generate tests from Jira. If the app itself needs secrets to run, see
+   [App secrets](#app-secrets-app_env).
 2. Add the variable `APP_URL`: a running, **disposable test instance** of the app that CI can reach. Never use
    production.
 3. Under **Settings → Actions → General**, enable **Allow GitHub Actions to create and approve pull requests**.
@@ -257,6 +262,7 @@ OpenCode's known gaps:
 | `OPENAI_API_KEY` | one of these three with `engine: opencode` | Provider key for OpenCode. |
 | `JIRA_TOKEN` | no | Accepted so both workflows share the same secrets. Healing does not use it. |
 | `PLATFORM_TOKEN` | no | Read token for this repository. Only needed if it is private. |
+| `APP_ENV` | no | The app's own variables for the test runs, one `KEY=value` per line; never given to an agent. See [App secrets](#app-secrets-app_env). |
 
 The secrets are optional in the workflow schema because which ones you need depends on `engine`. The first step of
 the `triage` job checks them and fails early, and it warns if `opencode_model`'s provider has no key. Each agent step
@@ -286,6 +292,9 @@ How it runs:
   - It fails if the triage agent doesn't write its report; then neither of the next two jobs runs.
 - **`heal`** runs only if triage found `SELECTOR_DRIFT` items. It gets `contents: write` and `pull-requests: write`.
   - The job fails if the healer doesn't write its report.
+  - If the healer changed files, a verification run executes the suite once more, with `APP_ENV`, before
+    anti-cheat. Its results go to the job summary ("Test results after healing") and to the PR description; they
+    don't block the PR.
   - The pr-writer agent runs with 20 turns.
   - The job's timeout is 90 minutes.
 - **`report-defects`** runs alongside `heal`, only if `report_defects` is true and triage found `REAL_BUG` items. It
@@ -318,8 +327,8 @@ How it runs:
 | `playwright_mcp_version` | no | `"0.0.84"` | Version of `@playwright/mcp`. |
 | `platform_ref` | no | `""` | Optional ref override, as in `test-and-heal.yml`. Empty uses the commit of the called workflow. |
 
-Secrets: the same model keys as `test-and-heal.yml`, plus `JIRA_TOKEN` (required with `jira_key`) and
-`PLATFORM_TOKEN` (optional).
+Secrets: the same model keys as `test-and-heal.yml`, plus `JIRA_TOKEN` (required with `jira_key`), `PLATFORM_TOKEN`
+(optional) and [`APP_ENV`](#app-secrets-app_env) (optional; only the test run after generation gets it).
 
 Output: `pr_url`.
 
@@ -342,6 +351,56 @@ compact JSON. It also outputs these derived values:
 - `runtime`: `java` if the commands use Maven or Gradle, otherwise `node`.
 - `engine`: the validated engine.
 
+## App secrets (`APP_ENV`)
+
+If the app under test needs secrets of its own, such as an API key or a database password, pass them in the optional
+secret `APP_ENV`, one `KEY=value` per line:
+
+```yaml
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      APP_ENV: |
+        OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
+```
+
+**Store them as repository secrets** (organization secrets work too). Secrets stored under a GitHub Environment
+aren't visible to reusable workflows, so they would arrive empty.
+
+**Only test runs get the values; agent steps never do.**
+- `test-and-heal.yml`: the `test` job, which runs no agent, loads them for its test run. The `heal` job loads them
+  only into its verification run after the healer.
+- `generate-tests.yml`: only the test run after generation gets them. A malformed `APP_ENV` fails the job at the
+  start, before any agent runs.
+- In a job that also runs agents, the values exist only in the test command's environment. Nothing is written to
+  `$GITHUB_ENV` or to disk.
+- `tests/run-tests.sh` checks the workflows for this: no job-wide `APP_ENV`, and no agent step with it.
+
+**Format:**
+- Blank lines and lines starting with `#` are skipped.
+- The value is everything after the first `=`, taken literally: quotes and `#` are part of it, and it can't span
+  lines.
+- Keys must match `^[A-Z_][A-Z0-9_]*$`. `GITHUB_*`, `RUNNER_*`, `ACTIONS_*`, `PATH`, `HOME` and `NODE_OPTIONS` are
+  refused. Provider keys such as `OPENROUTER_API_KEY` are allowed: `APP_ENV` never reaches an agent step, so the
+  app's copy can't replace an agent's key.
+- A malformed line fails the step, and the error names only its line number. Then nothing is loaded.
+- An empty value, for example from a secret that doesn't exist, loads as empty, with a warning.
+
+**Masking:**
+- Every value is masked in the logs with `::add-mask::`, so use `APP_ENV` for secrets only: a short value such as
+  `1` would be masked everywhere.
+- Masking covers logs, not files. Don't let the app put secrets into error messages, reports, traces or screenshots:
+  the agents read the test results.
+
+**Limits.** The agents' own test runs don't get these values: the triage agent's flakiness re-run, the healer's
+three runs and the generator's runs start the app without them. If the app can't start without its secrets, the
+agents can't verify their work, and the healer reverts what it can't verify. Then point `app_url` at a running test
+instance, or let the app start without those secrets.
+
+`scripts/load-app-env.sh` does the loading:
+- `load-app-env.sh` appends to `$GITHUB_ENV`, for a job without agents;
+- `load-app-env.sh -- <command>` runs one command with the values;
+- `load-app-env.sh --check` only validates and masks.
+
 ## Job summary
 
 `scripts/write-summary.sh` reads the JUnit reports and adds the test results to the job summary, the markdown
@@ -351,6 +410,7 @@ shown on the workflow run's **Summary** page:
 |---|---|---|
 | `test-and-heal.yml` | `test` | After every test run, whether the tests passed or not. |
 | `test-and-heal.yml` | `triage` | After triage, with a **Triage** column: each failure's classification and reason. |
+| `test-and-heal.yml` | `heal` | After the verification run, titled "Test results after healing". |
 | `generate-tests.yml` | `generate` | After the generated tests run. |
 
 The `report-defects` job adds a **Defects reported** section of its own (see [Defect reporting](#defect-reporting)).
@@ -585,6 +645,8 @@ These are **not** detected by the script and must be checked by the reviewer (th
     `webfetch: deny`.
 - **Checkouts use `persist-credentials: false`**, so agents can't push with the workflow token. Only
   `create-pull-request` pushes, after the guardrails pass.
+- **App secrets (`APP_ENV`) never reach an agent step.** Only test runs get them, masked in the logs; see
+  [App secrets](#app-secrets-app_env).
 - **Third-party actions are pinned to a commit SHA.** `peter-evans/create-pull-request` is pinned to `5f6978f…`
   (`# v8.1.1`). GitHub's own `actions/*` use major tags.
 
@@ -613,6 +675,9 @@ These are **not** detected by the script and must be checked by the reviewer (th
   - `fetch-spec.sh`: the Spec Kit folder must produce `003-feature.expected.md`;
   - `stage-agents.sh`: staging is checked for both engines, including the tools each agent may use;
   - `run-agent.sh`: the command lines are checked with stub `claude` / `opencode` executables;
+  - `load-app-env.sh`: each `tests/load-app-env/*.env` must load its `*.expected` or fail on the lines its header
+    names; no value may be printed outside `::add-mask::`; and no agent step or job-wide env in the workflows may
+    get `APP_ENV`;
   - `report-defects.sh`: `prepare` must produce `defect-candidates.expected.json`, and fingerprints must match
     their definition, stay the same when timings, ids and line numbers change, and change with the error;
     `publish` runs against a stub `gh` (new issues, a comment on an open issue, failed `gh` calls, missing and
