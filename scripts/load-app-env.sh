@@ -18,10 +18,10 @@
 # CMD's exit code.
 set -euo pipefail
 
-mode=github-env
+mode="github-env"
 case "${1:-}" in
-  --check) mode=check; shift ;;
-  --) mode=exec; shift ;;
+  --check) mode="check"; shift ;;
+  --) mode="exec"; shift ;;
 esac
 if { [ "$mode" = exec ] && [ "$#" -eq 0 ]; } || { [ "$mode" != exec ] && [ "$#" -gt 0 ]; }; then
   echo "usage: load-app-env.sh [--check | -- COMMAND [ARG...]]" >&2
