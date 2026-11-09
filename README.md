@@ -21,6 +21,57 @@ Whatever the test framework, the agents inspect the running app through one MCP 
 
 ## How it works
 
+Consumer repos call the platform's reusable workflows; agents run in the consumer's own job and every change comes
+back as a pull request or issue for human review.
+
+```mermaid
+flowchart LR
+  subgraph C["Consumer repo (e.g. Kestrel)"]
+    direction TB
+    T1["Spec / issue labelled<br/>ready-for-tests"]
+    T2["Push to app or tests"]
+    CW["Small caller workflows<br/>+ secrets + app URL"]
+    T1 --> CW
+    T2 --> CW
+  end
+
+  subgraph P["Agentic QA Platform (reusable workflows)"]
+    direction TB
+    subgraph G["Generate tests"]
+      PL["Planner"] --> GE["Generator"]
+    end
+    subgraph H["Test and heal"]
+      RUN["Run tests"] --> TR["Triage"]
+      TR -->|selector drift| HE["Healer"]
+      TR -->|real bug| DR["Defect reporter"]
+      TR -->|flaky / env| SUM["Job summary"]
+    end
+    AC["Anti-cheat guard"]
+    PW["PR writer"]
+  end
+
+  subgraph E["Pluggable engines and frameworks"]
+    EN["Claude Code or OpenCode<br/>(any model, e.g. DeepSeek)"]
+    FW["Playwright / Cypress / Selenium"]
+  end
+
+  CW -->|calls @main| G
+  CW -->|calls @main| H
+  G -.-> EN
+  H -.-> EN
+  G -.-> FW
+  H -.-> FW
+  GE --> AC
+  HE --> AC
+  AC --> PW
+
+  PW -->|"New tests PR"| OUT1["Pull request<br/>human review"]
+  PW -->|"Healed tests PR"| OUT1
+  DR -->|"Deduplicated"| OUT2["Bug issue"]
+  OUT1 --> C
+  OUT2 --> C
+```
+
 ```text
 test-and-heal.yml
   config ──► test ──(tests failed)──► triage ──┬──(SELECTOR_DRIFT)──► heal
