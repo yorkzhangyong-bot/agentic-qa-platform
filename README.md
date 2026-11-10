@@ -147,6 +147,7 @@ OpenCode's known gaps:
 ```text
 .
 ├── AGENT-RULES.md               shared rules every agent follows (engine-neutral)
+├── BACKLOG.md                   planned work and the evaluation plan
 ├── LICENSE                      MIT
 ├── frameworks/                  one config per framework
 │   ├── playwright.json
@@ -687,6 +688,7 @@ These are **not** detected by the script and must be checked by the reviewer (th
   - `actionlint` on the workflows;
   - validation of the framework JSON, `settings/*.json`, `AGENT-RULES.md` and the agents' front matter;
   - the fixture tests.
+- Planned work and the plan for evaluating the platform are in [`BACKLOG.md`](BACKLOG.md).
 
 ## License
 
