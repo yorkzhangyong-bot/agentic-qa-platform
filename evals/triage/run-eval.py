@@ -109,6 +109,7 @@ PLAYWRIGHT_INSTRUCTIONS = ("# Instructions\n\n- Following Playwright test failed
                            "- Provide a snippet of code with the fix, if possible.\n")
 RETRY_HEADER = re.compile(r"^\s*Retry #(\d+) " + "\N{BOX DRAWINGS LIGHT HORIZONTAL}")  # "Retry #1 ───…"
 CONTEXT_LINE = re.compile(r"^\s*Error Context: (\S+)\s*$")
+SNAPSHOT_BLOCK = "\n\n# Page snapshot\n"   # how a case's error gives an attempt its page snapshot
 CONTEXT_PATH = re.compile(rf"(?:\.\./)*({OUTPUT_DIR}/([^/\s]+)/error-context\.md)")
 FRAME_LINE = re.compile(r"^\s*(?:> )?\s*\d+ \||^\s*\| *\^")      # a code frame's lines and its caret line
 AT_LINE = re.compile(r"^\s+at \S")                                # a stack line, or "at file:line" above a frame
@@ -481,14 +482,16 @@ def failing_line(lines, decl, error):
 
 def reporter_error(case, at_line, at_col):
     """The case's error as the reporter prints it under the test's header. A one-line error is completed as Playwright
-    prints it: "<ErrorClass>: …" and the failing line. A multi-line error is the reporter's own text, with its call
-    log, code frame and retries."""
+    prints it: "<ErrorClass>: …" and the failing line; a page snapshot block after it stays after it. A multi-line
+    error is the reporter's own text, with its call log, code frame and retries. (error_context then takes the page
+    snapshots out.)"""
     error = case["error"].strip()
-    if "\n" in error:
+    line, block, snapshot = error.partition(SNAPSHOT_BLOCK)
+    if "\n" in line:
         return error
-    if not re.match(r"\w*(?:Error|Exception)\b", error):
-        error = f"Error: {error}"  # Playwright prints a thrown error as "<ErrorClass>: <message>"
-    return f"{error}\n\n    at {CI_CHECKOUT}/{case['file']}:{at_line}:{at_col}"
+    if not re.match(r"\w*(?:Error|Exception)\b", line):
+        line = f"Error: {line}"  # Playwright prints a thrown error as "<ErrorClass>: <message>"
+    return f"{line}\n\n    at {CI_CHECKOUT}/{case['file']}:{at_line}:{at_col}" + block + snapshot
 
 
 def sanitize_for_file_path(text):
@@ -636,7 +639,7 @@ def failure_inputs(case, project):
     sources.setdefault(case["file"], stub_test(case))
     source_lines = sources[case["file"]].splitlines()
     decl, decl_col = find_test("\n".join(source_lines), case["name"]) or (1, 1)
-    at = failing_line(source_lines, decl, case["error"])
+    at = failing_line(source_lines, decl, case["error"].partition(SNAPSHOT_BLOCK)[0])
     at_col = indent_of(source_lines[at]) + 1 if at < len(source_lines) else 1
     text, files = error_context(case, reporter_error(case, at + 1, at_col), sources, decl, decl_col)
     return decl, decl_col, text, files

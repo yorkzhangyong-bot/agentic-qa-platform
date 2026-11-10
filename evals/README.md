@@ -117,10 +117,21 @@ run of each case gets its own folder, `trials/<id>-r<n>/` in the work directory:
   project, and both CI attempts.
 
 A one-line error is completed the way Playwright prints it: `Error: …` plus the failing line. A multi-line error is
-the reporter's whole text. There is no app to inspect, so a case that needs page evidence gives an attempt a
-`# Page snapshot` (a blank line, then a ```` ```yaml ```` block) after its `Error Context:` line. That is the
-accessibility snapshot Playwright saves in `error-context.md` when a test fails. Two things change between the
-error and the report:
+the reporter's whole text.
+
+There is no app to inspect, so every attempt that failed on a loaded page carries its page snapshot. It's a
+`# Page snapshot` line, a blank line, then a ```` ```yaml ```` block, placed after the attempt's text (for a
+one-line error, after the line). It is what Playwright saves in `error-context.md` when a test fails: the
+accessibility tree of the page, from `page.ariaSnapshot()` in its "ai" mode, with refs and `[cursor=pointer]`. It
+shows the page the test was on, with what the error and the test describe, and nothing else.
+
+A case whose page never loaded anything has no snapshot, because Playwright writes none for an empty page:
+- T17: the navigation was refused;
+- T19: there was no browser;
+- T21 and T22: the test failed before it opened the app;
+- T27: a database helper failed before `page.goto`.
+
+Two things change between the error and the report:
 
 - **The page snapshot leaves the report**, because Playwright doesn't print it there. With `--snapshots`, the
   default, it goes into that attempt's `error-context.md`; with `--no-snapshots` it is gone.
@@ -135,7 +146,7 @@ workspace, where the triage job restores it from the `test-results` artifact. It
 - its `# Instructions` for a coding assistant;
 - the test's name and location;
 - the attempt's errors, without code frames or stack;
-- the page snapshot, if the case gives one for that attempt;
+- the page snapshot, unless the page never loaded;
 - the test source around the failing line, from the sample project.
 
 Nothing else goes in, so no label and no `why`. `--check` also makes sure each case's report and files give no
@@ -246,12 +257,22 @@ than one run per case.
 | 2026-11-10 | `7733701` | `36a02d1` | first 20-case set after permission and isolation fixes | opencode 1.19.5, `deepseek/deepseek-flash` | 20 × 1 | 20/20 (100%) | 0 | 0 | — | [42804483276](https://github.com/yorkzhangyong-bot/agentic-qa-platform/actions/runs/42804483276) |
 | 2026-11-10 | `22990d6` | `36a02d1` | 31 cases: added real Kestrel and tricky cases | opencode 1.19.5, `deepseek/deepseek-flash` | 31 × 3 | 84/90 (93%) | 0 | 3 | 27/31 | [42813980294](https://github.com/yorkzhangyong-bot/agentic-qa-platform/actions/runs/42813980294) |
 | 2026-11-10 | `6d66802` | `6d66802` | agents continue after denied paths; FLAKY and ENV triage rules | opencode 1.19.5, `deepseek/deepseek-flash` | 31 × 3 | 90/93 (97%) | 0 | 0 | 31/31 | [42830002351](https://github.com/yorkzhangyong-bot/agentic-qa-platform/actions/runs/42830002351) |
+| 2026-11-10 | `743be99` | `743be99` | Playwright's error-context.md for each attempt, a page snapshot in 4 cases; snapshots on | opencode 1.19.5, `deepseek/deepseek-flash` | 31 × 3 | 89/93 (96%) | 0 | 0 | 30/31 | [42851132289](https://github.com/yorkzhangyong-bot/agentic-qa-platform/actions/runs/42851132289) |
+| 2026-11-10 | `743be99` | `743be99` | the same, snapshots off | opencode 1.19.5, `deepseek/deepseek-flash` | 31 × 3 | 87/93 (94%) | 0 | 0 | 31/31 | [42854283500](https://github.com/yorkzhangyong-bot/agentic-qa-platform/actions/runs/42854283500) |
 
 The first row used a smaller, easier case set, the 20 seed cases, so it isn't directly comparable with the rows
 after it.
 
-The runs above came before `error-context.md`: the cases that have a page snapshot had it inside the error text,
-and the others had no `Error Context:` line. From now on, write in "What changed" whether a run had snapshots.
+The first three runs came before `error-context.md`: the cases that have a page snapshot had it inside the error
+text, and the others had no `Error Context:` line. From now on, write in "What changed" whether a run had snapshots.
+
+On `743be99` only 4 cases had a page snapshot, the ones that had it in the error text before:
+- **T25** was right in all 3 runs with snapshots and wrong in all 3 without.
+- **T05** missed once with snapshots: its error-context.md had no page snapshot, and the agent took that as evidence
+  against the error message.
+
+After `743be99`, every case whose page had loaded has a snapshot, so later runs aren't directly comparable with
+these two.
 
 ### Known hard cases
 

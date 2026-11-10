@@ -37,8 +37,9 @@
 #                    wrong place, last message); a multi-line error (a reporter's own text) reaches the JUnit report
 #                    unchanged. Each attempt's error-context.md is built as Playwright 1.65 writes it, in the folder
 #                    Playwright names (checked against a real Kestrel run): the case's page snapshot leaves the
-#                    report for the file, an attempt without an "Error Context:" line gets one, and a malformed
-#                    snapshot or path is refused. --no-snapshots writes no such file, with the same report, and its
+#                    report for the file (a one-line error with one is still completed), an attempt without an
+#                    "Error Context:" line gets one, and a malformed snapshot or path is refused. --no-snapshots
+#                    writes no such file, with the same report, and its
 #                    result file says so. Hide mode (CI set) runs on a scratch clone: it must delete all of
 #                    evals/ and the rest of the answer key, .git included, before the stub agent looks for it, report
 #                    that agent's run as invalid and unscored, and refuse to delete a .git with uncommitted work. No
@@ -1044,6 +1045,13 @@ text, files = ev.error_context(one, ev.reporter_error(one, 6, 3), sources, 3, 1)
 if (text.splitlines()[-1] != "Error Context: ../test-results/e2e-browser-x-x-chromium/error-context.md"
         or list(files) != ["test-results/e2e-browser-x-x-chromium/error-context.md"]):
     problems.append(f"the one-line error must get its Error Context line and file:\n{text}\n{list(files)}")
+snap = dict(case, error="locator.click: Timeout 10000ms exceeded.\n\n# Page snapshot\n\n```yaml\n"
+                        "- button \"Go\" [ref=e2] [cursor=pointer]\n```")
+text, files = ev.error_context(snap, ev.reporter_error(snap, 6, 3), sources, 3, 1)
+if (text.splitlines()[0] != "Error: locator.click: Timeout 10000ms exceeded." or "# Page snapshot" in text
+        or "- button \"Go\" [ref=e2] [cursor=pointer]" not in "".join(files.values())):
+    problems.append("a one-line error with a page snapshot must be completed, and the snapshot must go to its file:\n"
+                    + text)
 for bad in (attempt + "\n\n# Page snapshot\n\n- heading", attempt + "\n\nError Context: elsewhere/error-context.md"):
     try:
         ev.error_context(dict(case, error=bad), bad, sources, 3, 1)

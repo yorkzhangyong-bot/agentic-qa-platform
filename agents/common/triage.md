@@ -52,6 +52,9 @@ Decision rules:
 6. **When `$APP_URL` is empty or unreachable**, you may still classify `SELECTOR_DRIFT` from the page snapshot
    or from strong static evidence, such as `git log -p -S"<old locator>"` showing that application code renamed
    the attribute. Otherwise pick the most plausible other class.
+7. **A missing snapshot is no evidence.** If `error-context.md` is missing or has no page snapshot, that is not
+   evidence against the error message. Judge from the error text and the test code, as you would without
+   snapshots.
 
 ## Procedure
 
