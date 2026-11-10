@@ -67,9 +67,12 @@ conflicts with them. If a task can only be done by breaking a rule, stop and rep
   `settings/opencode-permissions.json` for OpenCode.
   - Commands must start with one of: `npx playwright test`, `npx playwright install`, `npx cypress run`, `mvn`,
     `pytest`, `git status`, `git diff`, `git log`, `ls`, `cat` or `mkdir`.
-  - Run one command per call. Pipes into other tools, loops and redirects are denied.
+  - Run one command per call. A command that contains `&`, `|`, `;`, a backtick, `$`, `>`, `<` or a line break
+    is refused, even inside quotes. That rules out chaining (`&&`, `||`, `;`), pipes, command substitution,
+    variables and redirects. Write a `-g`/`--grep` pattern or a search string without these characters, using
+    part of the test title if needed.
   - Use the read, grep and glob tools to inspect files.
-  - OpenCode additionally limits file edits to the test directory, `results/` and `PR_BODY.md`.
+  - OpenCode also limits file edits to the test directory, `results/` and `PR_BODY.md`.
 - Never commit, push, create branches or open pull requests. The workflow does that after `anti-cheat.sh` passes.
 - To revert your own edits, restore the original text with the edit tool. `git checkout` isn't allowed.
 - Don't install or upgrade dependencies or browsers. Report a missing tool as an `ENV` problem.

@@ -127,6 +127,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: triage-eval-logs
-          path: ${{ runner.temp }}/triage-eval/logs/
+          # Each run's own folder: its log (the engine's full transcript) and its result.
+          path: |
+            ${{ runner.temp }}/triage-eval/trials/*/agent.log
+            ${{ runner.temp }}/triage-eval/trials/*/result.json
           if-no-files-found: ignore
           retention-days: 30

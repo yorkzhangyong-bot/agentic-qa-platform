@@ -1,28 +1,35 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npx playwright test:*)",
-      "Bash(npx playwright install:*)",
-      "Bash(npx cypress run:*)",
-      "Bash(mvn:*)",
-      "Bash(pytest:*)",
-      "Bash(git status:*)",
-      "Bash(git diff:*)",
-      "Bash(git log:*)",
-      "Bash(ls:*)",
-      "Bash(cat:*)",
-      "Bash(mkdir:*)"
+      "Bash(npx playwright test *)",
+      "Bash(npx playwright install *)",
+      "Bash(npx cypress run *)",
+      "Bash(mvn *)",
+      "Bash(pytest *)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(mkdir *)"
     ],
     "deny": [
-      "Bash(curl:*)",
-      "Bash(wget:*)",
-      "Bash(git push:*)",
-      "Bash(git config:*)",
-      "Bash(env:*)",
-      "Bash(printenv:*)",
-      "Bash(echo $ANTHROPIC*)",
-      "Bash(nc:*)",
-      "Bash(ssh:*)"
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "Bash(git push *)",
+      "Bash(git config *)",
+      "Bash(env *)",
+      "Bash(printenv *)",
+      "Bash(nc *)",
+      "Bash(ssh *)",
+      "Bash(*&*)",
+      "Bash(*|*)",
+      "Bash(*;*)",
+      "Bash(*`*)",
+      "Bash(*$*)",
+      "Bash(*>*)",
+      "Bash(*<*)",
+      "Bash(*\n*)"
     ]
   }
 }

@@ -14,12 +14,16 @@
 #   SKIP_MCP_WARMUP=1       don't pre-download the MCP server (offline use, tests)
 #
 # ENGINE=claude    .claude/agents/<file>.md   copies of agents/common/*.md and agents/<framework>/*.md
-#                  .claude/settings.json      copy of settings/claude-settings.json (Bash allow/deny list)
+#                  .claude/settings.json      copy of settings/claude-settings.json (Bash allow/deny list). In a
+#                                             -p run Claude Code applies only its deny rules, so run-agent.sh also
+#                                             passes the file with --settings.
 #                  .mcp.json                  settings/claude-mcp.json with the MCP version pinned
-# ENGINE=opencode  .opencode/agents/<name>.md the same agents, front matter converted to OpenCode's format
+# ENGINE=opencode  .opencode/agents/<name>.md the same agents, front matter converted to OpenCode's format; its
+#                                             permission map only denies the tools the agent doesn't list
 #                  AGENTS.md                  copy of AGENT-RULES.md
 #                  opencode.json              the MCP servers in OpenCode's format, merged with
-#                                             settings/opencode-permissions.json ({TEST_DIR} filled in)
+#                                             settings/opencode-permissions.json ({TEST_DIR} filled in), which
+#                                             alone decides what a listed tool may do
 # Both engines: staged files and run artefacts are added to .git/info/exclude, so they never reach a pull request.
 set -euo pipefail
 
@@ -93,27 +97,28 @@ if engine == "claude":
     staged += [".claude/settings.json", ".mcp.json"]
 else:
     model = os.environ.get("OPENCODE_MODEL") or "deepseek/deepseek-flash"
-    builtin = {"Read": "read", "Write": "write", "Edit": "edit", "Bash": "bash", "Glob": "glob", "Grep": "grep"}
+    # OpenCode permission -> the agent tools that use it; Write and Edit share "edit".
+    uses = {"read": {"Read"}, "edit": {"Write", "Edit"}, "bash": {"Bash"}, "glob": {"Glob"}, "grep": {"Grep"}}
     for src in agents:
         fields, body = front_matter(src)
-        tools = {}
-        for tool in (t.strip() for t in fields.get("tools", "").split(",") if t.strip()):
+        listed = {t.strip() for t in fields.get("tools", "").split(",") if t.strip()}
+        servers_listed = set()
+        for tool in sorted(listed):
             mcp = re.fullmatch(r"mcp__(.+)__\*", tool)
-            if tool in builtin:
-                tools[builtin[tool]] = True
-            elif mcp:
-                tools[f"{mcp.group(1)}_*"] = True  # OpenCode names MCP tools <server>_<tool>
-            else:
+            if mcp:
+                servers_listed.add(mcp.group(1))
+            elif not any(tool in tools for tools in uses.values()):
                 print(f"stage-agents: {src.name}: no OpenCode equivalent for tool '{tool}'; skipped", file=sys.stderr)
-        for name in builtin.values():
-            tools.setdefault(name, False)  # a tool the agent doesn't list is switched off, not left at OpenCode's default
-        tools["webfetch"] = False
-        for name in servers:
-            tools.setdefault(f"{name}_*", False)
+        # The agent file only switches tools off. OpenCode applies an agent's own rules after opencode.json's and the
+        # last matching rule wins, so any allow here would override the shared rules: the deprecated `tools: {bash:
+        # true}` became "bash: allow" for every command, deny rules included. A listed tool gets no rule of its own,
+        # and settings/opencode-permissions.json alone decides what it may do.
+        deny = [permission for permission, tools in uses.items() if not tools & listed] + ["webfetch"]
+        deny += [f"{name}_*" for name in servers if name not in servers_listed]  # OpenCode names MCP tools <server>_<tool>
         # mode "all" (primary + subagent): `opencode run --agent <name>` needs an agent it may use as primary.
         lines = ["---", f"description: {json.dumps(fields['description'], ensure_ascii=False)}", "mode: all",
-                 f"model: {json.dumps(model)}", "tools:"]
-        lines += [f"  {json.dumps(key)}: {'true' if value else 'false'}" for key, value in tools.items()]
+                 f"model: {json.dumps(model)}", "permission:"]
+        lines += [f"  {json.dumps(permission)}: deny" for permission in deny]
         write(f".opencode/agents/{fields['name']}.md", "\n".join(lines) + "\n---\n\n" + body)
         staged.append(f".opencode/agents/{fields['name']}.md")
     write("AGENTS.md", (platform / "AGENT-RULES.md").read_text(encoding="utf-8"))

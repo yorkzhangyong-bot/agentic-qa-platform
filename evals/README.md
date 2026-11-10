@@ -41,10 +41,8 @@ What differs from CI, because the eval is offline:
   not only the final answer: Claude Code with `--output-format stream-json --verbose`, OpenCode with
   `--format json`. A wrapper on the agent's `PATH` adds the flags. `run-agent.sh` and what the agent may do are
   unchanged.
-- **Runs share one machine.** Up to `--jobs` agents run at once, where CI runs one per job on a fresh runner.
-  OpenCode creates and migrates its SQLite database on first use, and parallel first runs race on it: some fail at
-  startup with "database is locked" or a failed `CREATE TABLE`. So the eval creates the database once, with
-  `opencode db path`, before the parallel runs.
+- **Runs share one machine.** Up to `--jobs` agents run at once, where CI runs one per job on a fresh runner. So
+  each run is kept apart from the others; see [Keeping runs apart](#keeping-runs-apart).
 
 ### Keeping the answer key from the agent
 
@@ -73,8 +71,33 @@ of its reach:
    While the agents run, the progress lines show only the agents' answers, not the expected labels, because the
    job's log is on the same machine.
 3. **Runs that went for the key don't count.** A run is **invalid** if its log mentions `cases.jsonl`, `evals/`
-   or the checkout's path, or quotes a case's `why`. The report lists it with what was found, and it is not
-   scored. Paths inside the eval's own work directory (workspaces and logs) don't count.
+   or the checkout's path, or quotes a case's `why`. The same applies if it mentions the eval's work directory
+   outside the run's own folder, since that's where the other runs are. The report lists each invalid run with
+   what was found, and it is not scored. Paths inside the run's own folder don't count.
+
+### Keeping runs apart
+
+With `repeats` above 1, no run may see another run's answer; otherwise consistency would measure copying. Each
+run of each case gets its own folder, `trials/<id>-r<n>/` in the work directory:
+
+| In the run's folder | What it is |
+|---|---|
+| `workspace/` | the agent's workspace; removed after the run unless `--keep` |
+| `agent.log` | the run's log: building the workspace, then the engine's full transcript |
+| `result.json` | the run's record, as in the result file. It holds the expected label, so it is written only after the last agent has finished |
+| `tmp/` | the agent's temp directory (`TMPDIR`, `TMP`, `TEMP`) |
+| `engine-data/`, `engine-state/` | OpenCode only: its data and state directories, so its sessions, file snapshots, logs and long tool output stay with the run |
+
+- The log and the result are outside the workspace.
+- When a run ends, its folder is locked (mode 000) until the eval ends. The agents can't read it and can't run
+  `chmod`. On Windows a folder's mode doesn't stop reads, so there only the engines' own rules keep runs apart;
+  run the eval on Linux, as CI does.
+- A case's runs follow one another and never overlap. Different cases run in parallel.
+- Claude Code runs with `--no-session-persistence`, so it saves no transcripts in its config directory.
+- With its own data directory per run, OpenCode keeps its sessions there too. That also avoids a race: on one
+  shared database, parallel first runs fail at startup with "database is locked" or a failed `CREATE TABLE`.
+- If you use `opencode auth login` locally, the eval copies `auth.json` into each run's data directory for the run
+  and deletes it right after. In CI the key comes from the environment.
 
 ### Cases
 
@@ -122,8 +145,8 @@ Other options:
 - `--max-turns`;
 - `--timeout` (seconds per run, default 1200);
 - `--cases`, `--only`;
-- `--out` (result directory), `--work-dir` (workspaces and logs; must be outside the repository);
-- `--keep`;
+- `--out` (result directory), `--work-dir` (the runs' folders; must be outside the repository, and new or empty);
+- `--keep` (keep each run's workspace in its folder);
 - `--hide-answers` / `--no-hide-answers` (default: on when `CI` is set).
 
 ### Output
@@ -156,8 +179,8 @@ invalid run. It also records what's needed to compare scores over time:
 - `agent_rules_blob`, `platform_commit`, the prompt, the turn budget, and a hash of the cases file;
 - `deleted_before_agents`: what `--hide-answers` deleted.
 
-The workflow uploads the result file as the artifact `triage-eval-results` and the agents' logs as
-`triage-eval-logs`. To keep the history, commit the result file to `evals/triage/results/`.
+The workflow uploads the result file as the artifact `triage-eval-results`, and each run's `agent.log` and
+`result.json` as `triage-eval-logs`. To keep the history, commit the result file to `evals/triage/results/`.
 
 ### In CI
 

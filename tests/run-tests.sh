@@ -34,6 +34,14 @@
 #                    evals/ and the rest of the answer key, .git included, before the stub agent looks for it, report
 #                    that agent's run as invalid and unscored, and refuse to delete a .git with uncommitted work. No
 #                    model API is called.
+#   agent permissions  tests/engine-permissions/check.py runs the real claude and opencode, as staged for CI, against
+#                    a fake model (fake_model.py) that asks for one tool call per case: `ls && env`, `ls; env`,
+#                    `ls | env`, `echo $(env)`, `ls\nenv`, backticks, `$VAR`, redirects and a quoted `|` must be
+#                    refused without running; `npx playwright test x.spec.ts`, `git status` and writing
+#                    results/triage.json must work; OpenCode must refuse writing application source. Skipped when an
+#                    engine isn't installed, unless REQUIRE_ENGINES=1 (as in CI). The stage-agents.sh checks also
+#                    cover the permission files: no allow in an OpenCode agent file, the metacharacter denies after
+#                    every allow rule, and the same denies for Claude Code.
 #
 # Usage: bash tests/run-tests.sh          (exit code 0 when every check passes)
 set -euo pipefail
@@ -268,6 +276,7 @@ import sys
 
 root, scratch, engine = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
 problems = []
+METACHARACTERS = ("&", "|", ";", "`", "$", ">", "<", "\n")  # chaining, substitution, expansion, redirection
 
 
 def expect(condition, message):
@@ -289,6 +298,9 @@ if engine == "claude":
         expect(dest.exists() and read(dest) == read(src), f"{dest.name} is not a copy of the platform agent")
     expect(read(scratch / ".claude" / "settings.json") == read(root / "settings" / "claude-settings.json"),
            ".claude/settings.json is not a copy of settings/claude-settings.json")
+    deny = json.loads(read(root / "settings" / "claude-settings.json"))["permissions"]["deny"]
+    for char in METACHARACTERS:  # deny rules win over allow rules in Claude Code, in any order
+        expect(f"Bash(*{char}*)" in deny, f"claude-settings.json: no deny rule Bash(*{char!r}*)")
     mcp = json.loads(read(scratch / ".mcp.json"))
     expect(mcp["mcpServers"]["browser"]["args"][0] == "@playwright/mcp@9.9.9", f".mcp.json is not pinned: {mcp}")
 else:
@@ -298,12 +310,17 @@ else:
         expect(body == read(src).split("\n---\n", 1)[1].lstrip("\n"), f"{src.name}: body differs from the platform agent")
         expect("mode: all" in head and 'model: "openrouter/test-model"' in head, f"{src.name}: mode/model missing")
         listed = {t.strip() for t in re.search(r"^tools:(.*)$", read(src), re.M).group(1).split(",")}
-        for claude_tool in ("Read", "Write", "Edit", "Bash", "Glob", "Grep"):  # unlisted tools must be off explicitly
-            want = f'"{claude_tool.lower()}": {"true" if claude_tool in listed else "false"}'
-            expect(want in head, f"{src.name}: tools map lacks {want}")
-        expect('"webfetch": false' in head, f"{src.name}: webfetch must be off")
-        browser = '"browser_*": true' if "mcp__browser__*" in read(src) else '"browser_*": false'
-        expect(browser in head, f"{src.name}: expected {browser}")
+        # OpenCode applies the agent file's rules last, and the last match wins: the file may only switch tools off.
+        expect("tools:" not in head and "permission:" in head, f"{src.name}: expected a permission map, no tools map")
+        rules = head.split("permission:", 1)[-1]
+        expect("allow" not in rules, f"{src.name}: the agent file must not allow anything: {rules.strip()}")
+        for permission, tools in {"read": {"Read"}, "edit": {"Write", "Edit"}, "bash": {"Bash"}, "glob": {"Glob"},
+                                  "grep": {"Grep"}}.items():
+            expect((f'"{permission}": deny' in rules) == (not tools & listed),
+                   f"{src.name}: {permission} must be {'left to opencode.json' if tools & listed else 'denied'}")
+        expect('"webfetch": deny' in rules, f"{src.name}: webfetch must be denied")
+        expect(('"browser_*": deny' in rules) == ("mcp__browser__*" not in listed),
+               f"{src.name}: browser_* must be {'left to opencode.json' if 'mcp__browser__*' in listed else 'denied'}")
     expect(not (scratch / ".opencode" / "agent").exists(), "agents must be staged in .opencode/agents/, not .opencode/agent/")
     expect(read(scratch / "AGENTS.md") == read(root / "AGENT-RULES.md"), "AGENTS.md is not a copy of AGENT-RULES.md")
     config = json.loads(read(scratch / "opencode.json"))
@@ -312,8 +329,13 @@ else:
     permission = config["permission"]
     expect(permission["edit"].get("*") == "deny" and permission["edit"].get("e2e/**") == "allow",
            f"edit rules: {permission['edit']}")
-    expect(permission["bash"].get("*") == "deny" and permission["bash"].get("npx playwright test*") == "allow"
-           and permission["bash"].get("git push*") == "deny", f"bash rules: {permission['bash']}")
+    bash = permission["bash"]
+    expect(list(bash)[0] == "*" and bash["*"] == "deny" and bash.get("npx playwright test *") == "allow"
+           and bash.get("git push *") == "deny", f"bash rules: {bash}")
+    last_allow = max(n for n, key in enumerate(bash) if bash[key] == "allow")
+    for char in METACHARACTERS:  # the last matching rule wins in OpenCode: these must come after every allow rule
+        expect(bash.get(f"*{char}*") == "deny" and list(bash).index(f"*{char}*") > last_allow,
+               f"bash: *{char!r}* must be denied after every allow rule")
     expect(permission["webfetch"] == "deny", "webfetch must be denied")
 print("\n".join(problems))
 sys.exit(1 if problems else 0)
@@ -360,10 +382,10 @@ run_case() {  # run_case <name> <expected exit> <expected args, joined with spac
   fi
 }
 run_case claude-browser-agent 0 \
-  "-p Do the task. --agent triage --append-system-prompt-file $root/AGENT-RULES.md --allowedTools Read,Edit,Write,Glob,Grep,Agent,Task,mcp__browser__* --mcp-config .mcp.json --strict-mcp-config --permission-mode dontAsk --max-turns 7" \
+  "-p Do the task. --agent triage --append-system-prompt-file $root/AGENT-RULES.md --settings $root/settings/claude-settings.json --allowedTools Read,Edit,Write,Glob,Grep,Agent,Task,mcp__browser__* --mcp-config .mcp.json --strict-mcp-config --permission-mode dontAsk --max-turns 7" \
   ENGINE=claude AGENT=triage MAX_TURNS=7 EXPECTED_OUTPUT=results/triage.json
 run_case claude-agent-without-mcp 0 \
-  "-p Do the task. --agent pr-writer --append-system-prompt-file $root/AGENT-RULES.md --allowedTools Read,Edit,Write,Glob,Grep,Agent,Task --strict-mcp-config --permission-mode dontAsk --max-turns 20" \
+  "-p Do the task. --agent pr-writer --append-system-prompt-file $root/AGENT-RULES.md --settings $root/settings/claude-settings.json --allowedTools Read,Edit,Write,Glob,Grep,Agent,Task --strict-mcp-config --permission-mode dontAsk --max-turns 20" \
   ENGINE=claude AGENT=pr-writer MAX_TURNS=20 EXPECTED_OUTPUT=PR_BODY.md
 run_case opencode-agent 0 \
   "run --agent triage --model openrouter/test-model Do the task." \
@@ -692,10 +714,22 @@ cat > "$eval_bin/claude" <<'STUB'
 # Stub engine for the triage eval, as claude and as opencode: records its arguments and calls every failure
 # SELECTOR_DRIFT. In the workspace whose failure is the test $EVAL_STUB_PEEK_ON, it first runs cat $EVAL_STUB_PEEK,
 # as an agent hunting for the answer key would. For the test $EVAL_STUB_CRASH_ON it fails at startup instead, as
-# opencode did when parallel first runs raced to create its database.
+# opencode did when parallel first runs raced to create its database. It also records when its run (the folder
+# trials/<case>-r<n> around the workspace) starts and ends, its data and temp folders, and whether a second run
+# could read the first run's log.
 if [ "${1:-}" = --version ]; then echo "9.9.9 (Claude Code)"; exit 0; fi
 printf '%s\n' "$@" >> "$EVAL_STUB_ARGS"
-if [ "${1:-}" = db ]; then echo "/stub/opencode.db"; exit 0; fi
+run="$(basename "$(dirname "$PWD")")"
+echo "start $run" >> "$EVAL_STUB_ARGS"
+trap 'echo "end $run" >> "$EVAL_STUB_ARGS"' EXIT
+echo "folders data=${XDG_DATA_HOME//\\//} tmp=${TMPDIR//\\//}" >> "$EVAL_STUB_ARGS"
+case "$run" in
+  *-r1) ;;
+  *) if cat "../../${run%-r*}-r1/agent.log" > /dev/null 2>&1; then echo "$run read ${run%-r*}-r1" >> "$EVAL_STUB_ARGS"; fi ;;
+esac
+for result in ../../*/result.json; do  # a run's record holds its expected label: never on disk while agents run
+  if [ -e "$result" ]; then echo "$run found a result on disk: $result" >> "$EVAL_STUB_ARGS"; fi
+done
 if [ -n "${EVAL_STUB_CRASH_ON:-}" ] && grep -qF "$EVAL_STUB_CRASH_ON" results/failures.json; then
   printf '\033[91m\033[1mError: \033[0mUnexpected error\n\ndatabase is locked\n'
   exit 1
@@ -723,7 +757,7 @@ JSONL
 set +e
 (cd "$root" && env -u CI PATH="$eval_bin:$PATH" EVAL_STUB_ARGS="$work/eval-args.txt" SKIP_MCP_WARMUP=1 \
   GITHUB_STEP_SUMMARY="$work/eval-summary.md" python3 evals/triage/run-eval.py --engine claude \
-  --cases "$work/eval-cases.jsonl" --repeats 2 --jobs 1 --out "$work/eval-results" --work-dir "$work/eval-run" --keep \
+  --cases "$work/eval-cases.jsonl" --repeats 2 --jobs 4 --out "$work/eval-results" --work-dir "$work/eval-run" --keep \
   > "$work/eval.log" 2>&1)
 code=$?
 set -e
@@ -736,17 +770,52 @@ check_texts eval-run-with-stub-engine "$work/eval-transcript" \
   "-| drift |" "-### Invalid runs" "+\"engine_version\": \"9.9.9 (Claude Code)\"" "+\"model\": \"default\"" \
   "+\"blob\": \"$(git -C "$root" hash-object agents/common/triage.md)\"" "+\"deleted_before_agents\": []" \
   "+Triage every failure in results/failures.json" "+App URL: not provided." "+--max-turns" "+stream-json" \
-  "+drift run 1: expected SELECTOR_DRIFT, got SELECTOR_DRIFT"
+  "+--no-session-persistence" "+drift run 1: expected SELECTOR_DRIFT, got SELECTOR_DRIFT"
 # The answer must never reach the agent: no workspace may contain a case's "why".
-kept="$(find "$work/eval-run/workspaces" -mindepth 1 -maxdepth 1 -type d | wc -l)"
-if [ "$kept" -eq 6 ] && ! grep -rqF "never-shown-to-the-agent" "$work/eval-run/workspaces"; then
+kept="$(find "$work/eval-run/trials" -mindepth 2 -maxdepth 2 -type d -name workspace | wc -l)"
+if [ "$kept" -eq 6 ] && ! grep -rqF "never-shown-to-the-agent" "$work"/eval-run/trials/*/workspace; then
   ok "eval-workspaces-hide-the-answer"
 else
-  bad "eval-workspaces-hide-the-answer" "$kept workspaces kept; the why text is in:"$'\n'"$(grep -rlF never-shown-to-the-agent "$work/eval-run/workspaces" | head -n 3)"
+  bad "eval-workspaces-hide-the-answer" "$kept workspaces kept; the why text is in:"$'\n'"$(grep -rlF never-shown-to-the-agent "$work"/eval-run/trials/*/workspace | head -n 3)"
 fi
-# OpenCode's transcript, its JSON event stream, goes to the log too. Its database must be created once before the
-# parallel runs. In drift the stub agent reads a copy of the answer key under another name: that run is invalid
-# because the log quotes a case's "why". In bug the stub fails at startup: the report must say how.
+# Each run has its own folder, its log and result outside the workspace. A case's two runs never overlap, though
+# --jobs 4 leaves room for them to, and when run 2 starts, run 1's folder is locked (on Windows a folder's mode doesn't
+# stop reads, so that part is skipped). After the eval every folder is readable again.
+set +e
+python3 - "$work/eval-args.txt" "$work/eval-run/trials" > "$work/eval-isolation.log" 2>&1 <<'PY'
+import sys
+from pathlib import Path
+
+order = [line.strip() for line in open(sys.argv[1], encoding="utf-8") if line.startswith(("start ", "end "))]
+problems = []
+for case in ("drift", "bug", "env"):
+    try:
+        if order.index(f"end {case}-r1") > order.index(f"start {case}-r2"):
+            problems.append(f"{case}: run 2 started before run 1 ended")
+    except ValueError as exc:
+        problems.append(f"{case}: {exc}")
+for run in sorted(f"{case}-r{n}" for case in ("drift", "bug", "env") for n in (1, 2)):
+    folder = Path(sys.argv[2]) / run
+    missing = [name for name in ("agent.log", "result.json", "workspace") if not (folder / name).exists()]
+    if missing:
+        problems.append(f"{run}: no {', '.join(missing)} in its folder after the eval")
+print("\n".join(problems))
+sys.exit(1 if problems else 0)
+PY
+code=$?
+set -e
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN*) ;;
+  *) if grep -q -- "-r2 read " "$work/eval-args.txt"; then code=1; grep -- "-r2 read " "$work/eval-args.txt" >> "$work/eval-isolation.log"; fi ;;
+esac
+if grep -q "found a result on disk" "$work/eval-args.txt"; then
+  code=1
+  grep "found a result on disk" "$work/eval-args.txt" >> "$work/eval-isolation.log"
+fi
+if [ "$code" -eq 0 ]; then ok "eval-runs-are-isolated"; else bad "eval-runs-are-isolated" "$(cat "$work/eval-isolation.log")"; fi
+# OpenCode's transcript, its JSON event stream, goes to the log too, and each run gets its own data folder (sessions,
+# snapshots) and temp folder. In drift the stub agent reads a copy of the answer key under another name: that run is
+# invalid because the log quotes a case's "why". In bug the stub fails at startup: the report must say how.
 cp "$work/eval-cases.jsonl" "$work/key-copy.txt"
 set +e
 (cd "$root" && env -u CI PATH="$eval_bin:$PATH" EVAL_STUB_ARGS="$work/eval-oc-args.txt" \
@@ -759,7 +828,7 @@ set -e
 { cat "$work/eval-oc-summary.md" "$work/eval-oc-args.txt" "$work/eval-oc.log"; } > "$work/eval-oc-transcript" \
   2> /dev/null || true
 check_texts eval-opencode-transcript "$work/eval-oc-transcript" "+deepseek/deepseek-flash" "+--format" \
-  "-stream-json" "+opencode's database is ready for the parallel runs: /stub/opencode.db" \
+  "-stream-json" "+/trials/drift-r1/engine-data tmp=" "+/trials/bug-r1/engine-data tmp=" "+/trials/drift-r1/tmp" \
   "+**Accuracy** 0/1 (0%)" "+**Invalid runs** 1 (not scored)" \
   "+the log quotes the answer key (the why of drift, bug and env)" \
   "+| bug | shows correct total | REAL_BUG | none | no triage.json: opencode failed before the agent took a step (exit code 1): Unexpected error: database is locked |"
@@ -849,7 +918,7 @@ set +e
 code=$?
 set -e
 { cat "$work/hide-summary.md" "$work"/hide-repo/evals/triage/results/*.json "$work/hide.log" \
-    "$work/hide-run/logs/env-r1.log"; } > "$work/hide-transcript" 2> /dev/null || true
+    "$work/hide-run/trials/env-r1/agent.log"; } > "$work/hide-transcript" 2> /dev/null || true
 check_texts eval-hide-answers-in-ci "$work/hide-transcript" \
   "+  evals/  (the eval: its cases, result files" "-  evals/triage/" \
   "+  notes.txt  (drift: its why" "+  tests/run-tests.sh  (drift: its why" "+  .git/  (" \
@@ -892,6 +961,68 @@ if [ "$code" -eq 1 ] && grep -qF "would delete .git, which holds uncommitted cha
 else
   bad "eval-hide-answers-keeps-local-work" "exit $code"$'\n'"$(cat "$work/guard.log")"
 fi
+
+echo
+echo "agent permissions on the real engines (tests/engine-permissions/; a fake model, no API key)"
+# Chained, substituted, expanded and redirected commands must be refused, and the test command and the triage
+# output must still work, on each engine as staged for CI. This needs the engine CLIs: ci.yml installs the versions
+# the workflows install by default and sets REQUIRE_ENGINES=1, so there a missing engine fails instead of skipping.
+if python3 - "$root" > "$work/engine-versions.log" 2>&1 <<'PY'
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+ci = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+problems = []
+for name, var in (("claude_code_version", "CLAUDE_CODE_VERSION"), ("opencode_version", "OPENCODE_VERSION")):
+    tested = re.search(rf'^\s+{var}: "([^"]+)"', ci, re.M)
+    for workflow in ("test-and-heal.yml", "generate-tests.yml", "eval-triage.yml"):
+        text = (root / ".github/workflows" / workflow).read_text(encoding="utf-8")
+        used = re.search(rf'^\s+{name}:\n(?:\s+\w+:.*\n)*?\s+default: "([^"]+)"', text, re.M) or re.search(
+            rf'^\s+{var}: "([^"]+)"', text, re.M)
+        if not tested or not used or tested.group(1) != used.group(1):
+            problems.append(f"{workflow} installs {var} {used and used.group(1)}, ci.yml tests "
+                            f"{tested and tested.group(1)}")
+print("\n".join(problems))
+sys.exit(1 if problems else 0)
+PY
+then
+  ok "engine-versions-match"
+else
+  bad "engine-versions-match" "$(cat "$work/engine-versions.log")"
+fi
+engines=(claude opencode)
+pids=()
+for engine in "${engines[@]}"; do
+  python3 "$root/tests/engine-permissions/check.py" "$engine" "$work/permissions-$engine" \
+    > "$work/permissions-$engine.log" 2>&1 &
+  pids+=("$!")
+done
+for n in "${!engines[@]}"; do
+  engine="${engines[$n]}"
+  set +e
+  wait "${pids[$n]}"
+  code=$?
+  set -e
+  if [ "$code" -eq 3 ]; then
+    if [ "${REQUIRE_ENGINES:-0}" = 1 ]; then
+      bad "$engine-permissions" "$engine is not installed, and REQUIRE_ENGINES=1"
+    else
+      echo "  skip  $engine-permissions ($engine is not installed)"
+    fi
+    continue
+  fi
+  while IFS=$'\t' read -r status name detail; do
+    case "$status" in
+      ok) ok "$name" ;;
+      FAIL) bad "$name" "$detail" ;;
+    esac
+  done < "$work/permissions-$engine.log"
+  if [ "$code" -ne 0 ] && ! grep -q '^FAIL' "$work/permissions-$engine.log"; then
+    bad "$engine-permissions" "exit $code"$'\n'"$(tail -n 20 "$work/permissions-$engine.log")"
+  fi
+done
 
 echo
 echo "$passed passed, $failed failed"

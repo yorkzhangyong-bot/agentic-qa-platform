@@ -533,14 +533,15 @@ def build_workspace(case, ws, project, engine, model, log):
 def transcript_wrapper(work_dir, engine):
     """A bin directory whose <engine> runs the real one with its full transcript on stdout: the engine's JSON event
     stream, with every tool call and result, so the leak check sees what the agent did and not only its answer.
-    run-agent.sh and what the agent can do stay the same."""
+    Claude Code also stops saving the session to its config directory, where a later run could read it (OpenCode
+    gets a data directory of its own per run instead). run-agent.sh and what the agent can do stay the same."""
     code, out = run([BASH, "-c", f"command -v {engine}"], ROOT)
     real = out.strip().splitlines()[-1] if code == 0 and out.strip() else ""
     if not real:
         raise EvalError(f"can't find the {engine} CLI on PATH")
     real = shlex.quote(real)
     if engine == "claude":
-        body = f'exec {real} "$@" --output-format stream-json --verbose\n'
+        body = f'exec {real} "$@" --output-format stream-json --verbose --no-session-persistence\n'
     else:
         body = f'if [ "${{1:-}}" = run ]; then exec {real} "$@" --format json; fi\nexec {real} "$@"\n'
     wrapper = work_dir / "bin" / engine
@@ -564,14 +565,16 @@ def and_list(items):
     return ", ".join(items[:-1]) + " and " + items[-1] if len(items) > 1 else "".join(items)
 
 
-def log_leak(output, work_dir, cases):
+def log_leak(output, run_dir, work_dir, cases):
     """Why an agent's log shows it went for the answer key, with where: (reason, context), or ("", "") if it didn't.
-    It did if the log mentions where the key lives, or quotes a case's "why" (in a JSON event stream, escaped).
-    Paths under work_dir, the workspaces and logs, which hold no answers, are cut first: only places outside count."""
+    It did if the log mentions where the key lives, or quotes a case's "why" (in a JSON event stream, escaped), or
+    mentions the eval's work folder, which holds the other runs. The run's own folder (run_dir: its workspace, log
+    and engine data) is cut first."""
     flags = re.I if os.name == "nt" else 0
-    text = re.sub(path_pattern(work_dir), "<work-dir>", output, flags=flags)
-    found = [(name, text, m) for name, pattern in (*POINTERS, ("the checkout's path", path_pattern(ROOT)))
-             if (m := re.search(pattern, text, flags))]
+    text = re.sub(path_pattern(run_dir), "<this run>", output, flags=flags)
+    places = (*POINTERS, ("the checkout's path", path_pattern(ROOT)),
+              ("the eval's work folder (other runs)", path_pattern(work_dir)))
+    found = [(name, text, m) for name, pattern in places if (m := re.search(pattern, text, flags))]
     plain = " ".join(re.sub(r"\\[nrt]", " ", text).replace('\\"', '"').replace("\\\\", "\\").split())
     quoted = [(case["id"], m) for case in cases if len(why := " ".join(case["why"].split())) >= MIN_WHY
               and (m := re.search(re.escape(why), plain))]
@@ -708,41 +711,83 @@ def read_verdict(path, failure):
     return verdict
 
 
+def opencode_auth():
+    """OpenCode's stored login (`opencode auth login`), which a run's own data directory needs a copy of."""
+    data = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    return data / "opencode" / "auth.json"
+
+
 def run_trial(case, repeat, opts, step, work_dir, bin_dir, project, answer_key):
-    ws = work_dir / "workspaces" / f"{case['id']}-r{repeat}"
+    """One run of one case, in its own folder trials/<id>-r<n>/: the agent's workspace, and outside it the run's log
+    (agent.log), its temp directory and, for OpenCode, its data directory (sessions, snapshots, logs, long tool
+    output). Its result.json, which holds the expected label, is written there only after every agent is done (see
+    main). When the run is over its folder is locked (see lock), so no later run can read it; repeats of one case
+    never run at the same time."""
+    run_dir = work_dir / "trials" / f"{case['id']}-r{repeat}"
+    ws = run_dir / "workspace"
+    if run_dir.exists():
+        raise EvalError(f"{run_dir} already exists: give --work-dir an empty or new directory")
+    run_dir.mkdir(parents=True)
+    os.chmod(run_dir, 0o700)
     trial = {"case": case["id"], "test": case["name"], "repeat": repeat, "expected": case["expected"], "got": "none",
              "reason": "", "exit_code": None, "seconds": 0.0, "error": "", "invalid": "", "invalid_context": ""}
     started = time.monotonic()
-    with open(work_dir / "logs" / f"{case['id']}-r{repeat}.log", "w", encoding="utf-8", newline="\n") as log:
-        failure = build_workspace(case, ws, project, opts.engine, opts.model, log)
-        if opts.dry_run:
-            trial["got"] = "dry-run"
-        else:
-            env = {**os.environ, "ENGINE": opts.engine, "AGENT": "triage", "PROMPT": step["prompt"],
-                   "MAX_TURNS": str(step["max_turns"]), "EXPECTED_OUTPUT": step["expected_output"],
-                   "PLATFORM_DIR": ".agentic-qa", "MCP_SERVER": "browser", "MCP_TIMEOUT": "60000",
-                   "FRAMEWORK": FRAMEWORK, "TEST_DIR": TEST_DIR, "APP_URL": "",
-                   "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"}  # the engine with a full transcript
-            for name in ("PWD", "OLDPWD"):  # they name this checkout; bash sets PWD to the workspace
-                env.pop(name, None)
-            if "GITHUB_WORKSPACE" in env:
-                env["GITHUB_WORKSPACE"] = str(ws)  # in CI it is the agent's own repository, not the platform's
-            if opts.engine == "opencode":
-                env["OPENCODE_MODEL"] = opts.model
-            elif opts.model:
-                env["ANTHROPIC_MODEL"] = opts.model
-            code, out = run([BASH, ".agentic-qa/scripts/run-agent.sh"], ws, env=env, timeout=opts.timeout, log=log)
-            trial["exit_code"] = code
-            output = ws / step["expected_output"]
-            if output.is_file():
-                trial.update(read_verdict(output, failure))
+    login = None
+    try:
+        with open(run_dir / "agent.log", "w", encoding="utf-8", newline="\n") as log:
+            failure = build_workspace(case, ws, project, opts.engine, opts.model, log)
+            if opts.dry_run:
+                trial["got"] = "dry-run"
             else:
-                trial["error"] = f"no {output.name}: {missing_output(out, code, ws, step, opts)}"
-            trial["invalid"], trial["invalid_context"] = log_leak(out, work_dir, answer_key)
-    trial["seconds"] = round(time.monotonic() - started, 1)
-    if not opts.keep:
-        remove(ws)
+                tmp = run_dir / "tmp"
+                tmp.mkdir()
+                env = {**os.environ, "ENGINE": opts.engine, "AGENT": "triage", "PROMPT": step["prompt"],
+                       "MAX_TURNS": str(step["max_turns"]), "EXPECTED_OUTPUT": step["expected_output"],
+                       "PLATFORM_DIR": ".agentic-qa", "MCP_SERVER": "browser", "MCP_TIMEOUT": "60000",
+                       "FRAMEWORK": FRAMEWORK, "TEST_DIR": TEST_DIR, "APP_URL": "",
+                       "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",  # the engine with a full transcript
+                       "TMPDIR": str(tmp), "TMP": str(tmp), "TEMP": str(tmp)}
+                for name in ("PWD", "OLDPWD"):  # they name this checkout; bash sets PWD to the workspace
+                    env.pop(name, None)
+                if "GITHUB_WORKSPACE" in env:
+                    env["GITHUB_WORKSPACE"] = str(ws)  # in CI it is the agent's own repository, not the platform's
+                if opts.engine == "opencode":
+                    env.update(OPENCODE_MODEL=opts.model, XDG_DATA_HOME=str(run_dir / "engine-data"),
+                               XDG_STATE_HOME=str(run_dir / "engine-state"))
+                    if opencode_auth().is_file():
+                        login = run_dir / "engine-data" / "opencode" / "auth.json"
+                        login.parent.mkdir(parents=True)
+                        shutil.copy2(opencode_auth(), login)
+                elif opts.model:
+                    env["ANTHROPIC_MODEL"] = opts.model
+                code, out = run([BASH, ".agentic-qa/scripts/run-agent.sh"], ws, env=env, timeout=opts.timeout,
+                                log=log)
+                trial["exit_code"] = code
+                output = ws / step["expected_output"]
+                if output.is_file():
+                    trial.update(read_verdict(output, failure))
+                else:
+                    trial["error"] = f"no {output.name}: {missing_output(out, code, ws, step, opts)}"
+                trial["invalid"], trial["invalid_context"] = log_leak(out, run_dir, work_dir, answer_key)
+        trial["seconds"] = round(time.monotonic() - started, 1)
+        if not opts.keep:
+            remove(ws)
+    finally:
+        if login is not None:
+            login.unlink(missing_ok=True)  # the copied login doesn't stay in the run's folder
+        lock(run_dir)
     return trial
+
+
+def lock(run_dir):
+    """Lock a finished run's folder (mode 000) until the eval ends: the agents can't read it, and they can't run
+    chmod. On Windows a folder's mode doesn't stop reads; there the engines' own rules are the only barrier."""
+    os.chmod(run_dir, 0)
+
+
+def unlock(work_dir):
+    for run_dir in sorted((work_dir / "trials").glob("*")):
+        os.chmod(run_dir, 0o700)
 
 
 def score(trials, repeats):
@@ -854,19 +899,6 @@ def engine_version(engine):
     return (out.strip().splitlines() or ["unknown"])[0]
 
 
-def prepare_engine(engine, work_dir):
-    """Set-up that parallel runs must not race on. opencode creates and migrates its SQLite database on first use,
-    and several first runs at once fail with "database is locked" or a failed CREATE TABLE, so create it once now."""
-    if engine != "opencode":
-        return
-    code, out = run([BASH, "-c", "opencode db path"], work_dir, timeout=120)
-    if code:
-        say("run-eval: warning: couldn't create opencode's database before the parallel runs, so they may fail at "
-            f"startup: {' '.join(out.split())[:200]}", sys.stderr)
-    else:
-        say(f"run-eval: opencode's database is ready for the parallel runs: {(out.strip().splitlines() or ['?'])[-1]}")
-
-
 def warm_up_mcp():
     """Download the browser MCP server once, instead of in every workspace."""
     if os.environ.get("SKIP_MCP_WARMUP") == "1":
@@ -962,43 +994,58 @@ def main():
         project = load_project()
         version = "" if opts.dry_run else engine_version(opts.engine)
         work_dir = (opts.work_dir or Path(tempfile.mkdtemp(prefix="triage-eval-"))).resolve()
-        (work_dir / "workspaces").mkdir(parents=True, exist_ok=True)
-        (work_dir / "logs").mkdir(parents=True, exist_ok=True)
+        (work_dir / "trials").mkdir(parents=True, exist_ok=True)
         bin_dir = None if opts.dry_run else transcript_wrapper(work_dir, opts.engine)
         repeats = 1 if opts.dry_run else opts.repeats
-        jobs = [(case, repeat) for repeat in range(1, repeats + 1) for case in cases]
+        total = len(cases) * repeats
         if not opts.dry_run:
-            prepare_engine(opts.engine, work_dir)
             warm_up_mcp()
         hidden = []
         if hide:
             hidden, text = hide_answers(all_cases, opts.cases)
             say("run-eval: answer key hidden: deleted before the first agent starts:\n" + text)
         say(f"run-eval: {len(cases)} cases {TIMES} {repeats} run(s), {opts.jobs} at a time, engine {opts.engine} "
-            f"{opts.model or 'default'}; logs in {work_dir / 'logs'}")
-        trials, done = [], 0
-        with concurrent.futures.ThreadPoolExecutor(max_workers=opts.jobs) as pool:
-            futures = {pool.submit(run_trial, case, repeat, opts, step, work_dir, bin_dir, project, all_cases):
-                       (case, repeat) for case, repeat in jobs}
-            for future in concurrent.futures.as_completed(futures):
-                case, repeat = futures[future]
-                try:
-                    trial = future.result()
-                except EvalError:
-                    pool.shutdown(wait=False, cancel_futures=True)
-                    raise
-                done += 1
+            f"{opts.model or 'default'}; each run's folder is in {work_dir / 'trials'}")
+        trials, collected, stop = [], threading.Lock(), threading.Event()
+
+        def finished(trial):
+            with collected:
                 trials.append(trial)
-                if opts.dry_run:
-                    outcome = "workspace OK"
-                elif hide:  # no labels in the job's log, which is on this machine, while other agents still run
-                    outcome = f"got {trial['got']}"
-                else:
-                    outcome = (f"expected {trial['expected']}, got {trial['got']}"
-                               + ("" if trial["got"] == trial["expected"] else "  <- wrong"))
-                outcome += (f" ({trial['error']})" if trial["error"] else "") + (
-                    f"  INVALID: {trial['invalid']}" if trial["invalid"] else "")
-                say(f"[{done}/{len(jobs)}] {case['id']} run {repeat}: {outcome} ({trial['seconds']}s)")
+                done = len(trials)
+            if opts.dry_run:
+                outcome = "workspace OK"
+            elif hide:  # no labels in the job's log, which is on this machine, while other agents still run
+                outcome = f"got {trial['got']}"
+            else:
+                outcome = (f"expected {trial['expected']}, got {trial['got']}"
+                           + ("" if trial["got"] == trial["expected"] else "  <- wrong"))
+            outcome += (f" ({trial['error']})" if trial["error"] else "") + (
+                f"  INVALID: {trial['invalid']}" if trial["invalid"] else "")
+            say(f"[{done}/{total}] {trial['case']} run {trial['repeat']}: {outcome} ({trial['seconds']}s)")
+
+        def case_runs(case):
+            # A case's runs follow one another, never overlapping, so no run can watch another run of its case;
+            # a finished run's folder is locked. Different cases run in parallel.
+            for repeat in range(1, repeats + 1):
+                if stop.is_set():
+                    return
+                finished(run_trial(case, repeat, opts, step, work_dir, bin_dir, project, all_cases))
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=opts.jobs) as pool:
+                futures = [pool.submit(case_runs, case) for case in cases]
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        future.result()
+                    except EvalError:
+                        stop.set()
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        raise
+        finally:
+            unlock(work_dir)
+        for trial in trials:  # each run's record, labels included: only now that no agent is running
+            write(work_dir / "trials" / f"{trial['case']}-r{trial['repeat']}" / "result.json",
+                  json.dumps(trial, indent=2, ensure_ascii=False) + "\n")
         if opts.dry_run:
             say(f"run-eval: dry run OK: {len(trials)} workspaces built, each with exactly its failure in "
                 "results/failures.json; the agent was not run.")

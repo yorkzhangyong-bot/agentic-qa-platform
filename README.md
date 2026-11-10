@@ -112,15 +112,18 @@ generate-tests.yml
 
 | Engine | Install | Secret | Model | Known gaps |
 |---|---|---|---|---|
-| `claude` (default) | `npm i -g @anthropic-ai/claude-code@<claude_code_version>` (default `2.1.283`) | `ANTHROPIC_API_KEY` | Claude Code's default | None known. This is the engine the agents were written and checked against: exact turn limits (`--max-turns`), and Bash limited by `settings/claude-settings.json`. |
+| `claude` (default) | `npm i -g @anthropic-ai/claude-code@<claude_code_version>` (default `2.1.283`) | `ANTHROPIC_API_KEY` | Claude Code's default | None known. This is the engine the agents were written and checked against: exact turn limits (`--max-turns`), and Bash limited by `settings/claude-settings.json`, which `run-agent.sh` passes with `--settings`. |
 | `opencode` | `npm i -g opencode-ai@<opencode_version>` (default `1.19.5`) | At least one of `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY` (the one matching the model's provider) | `opencode_model`, default `deepseek/deepseek-flash` | See the list below. |
 
 OpenCode's known gaps:
 - No turn cap: `MAX_TURNS` is emulated with a time limit of 30 s per turn.
 - Agents are staged with `mode: all`, so that `opencode run --agent` can use them as its primary agent.
 - MCP tools are named `browser_<tool>`.
-- How its permission patterns behave (rule precedence, path patterns for edits) depends on the OpenCode version.
-- The `opencode_version` default is unverified.
+- How its permission patterns behave depends on the OpenCode version. In 1.19.5 the last matching rule wins, an
+  agent file's own rules come after `opencode.json`'s, each part of a chained command is checked on its own, and
+  edit paths are relative to the repository root. `tests/engine-permissions/` checks the staged permissions on
+  that version (see [Security](#security)).
+- Apart from its permissions, the `opencode_version` default is unverified.
 
 **What staging writes for each engine:**
 - **claude:**
@@ -128,8 +131,11 @@ OpenCode's known gaps:
   - `.claude/settings.json` (Bash allow/deny list);
   - `.mcp.json` (from `settings/claude-mcp.json`, MCP version pinned).
 - **opencode:**
-  - `.opencode/agents/<name>.md`, with front matter converted to `description`, `mode`, `model` and a `tools` map,
-    where `mcp__browser__*` becomes `"browser_*"` and built-in tools the agent doesn't list are set to `false`;
+  - `.opencode/agents/<name>.md`, with front matter converted to `description`, `mode`, `model` and a `permission`
+    map. The map only denies: the built-in tools the agent doesn't list (Write and Edit share `edit`), `webfetch`,
+    and `browser_*` (the MCP tools) unless the agent lists `mcp__browser__*`. A listed tool gets no rule of its own.
+    OpenCode applies an agent's rules last and the last matching rule wins, so an allow there would override every
+    deny in `opencode.json`;
   - `AGENTS.md`, a copy of `AGENT-RULES.md`;
   - `opencode.json`: the `browser` MCP server (`type: local`) merged with `settings/opencode-permissions.json`.
     Bash uses the same allow/deny list as Claude, edits are limited to the test directory, `results/` and
@@ -557,8 +563,10 @@ passes it:
    - Keep the front-matter names `planner`, `generator` and `healer`; the workflows run those agents by name.
    - Describe the framework's idioms, locator API, test command and single-test re-run command.
 3. **Bash permissions.** Allow the framework's test command for both engines. Otherwise the agents can't run tests.
-   - In `settings/claude-settings.json`, e.g. `Bash(npx wdio run:*)`.
-   - In `settings/opencode-permissions.json`, e.g. `"npx wdio run*": "allow"`.
+   - In `settings/claude-settings.json`, e.g. `Bash(npx wdio run *)` in `allow`.
+   - In `settings/opencode-permissions.json`, e.g. `"npx wdio run *": "allow"`. Put it with the other allow rules,
+     before the rules for shell metacharacters: in OpenCode the last matching rule wins.
+   - Add the command to `tests/engine-permissions/check.py` as a case that must work.
 4. **Guardrails.** If the framework has its own skip/focus syntax, sleep API or assertion keywords:
    - add them to the patterns in `scripts/anti-cheat.sh`;
    - add `pass-*` and `fail-*` fixtures under `tests/anti-cheat/`.
@@ -640,12 +648,28 @@ These are **not** detected by the script and must be checked by the reviewer (th
   - `git status`, `git diff`, `git log`;
   - `ls`, `cat` and `mkdir`.
 
-  `curl`, `wget`, `git push`, `git config`, `env`, `printenv`, `echo $ANTHROPIC*`, `nc` and `ssh` are explicitly
-  denied.
-  - **Claude Code:** the list is staged as `.claude/settings.json`, and the agents run with
-    `--permission-mode dontAsk` and no `Bash` in `--allowedTools`.
-  - **OpenCode:** it is merged into `opencode.json` as `permission.bash`, together with edit limits and
-    `webfetch: deny`.
+  `curl`, `wget`, `git push`, `git config`, `env`, `printenv`, `nc` and `ssh` are explicitly denied.
+
+  So is any command that contains `&`, `|`, `;`, a backtick, `$`, `>`, `<` or a line break, even inside quotes.
+  This blocks chaining a denied command onto an allowed one (`ls && env`), substitution (`echo $(env)`), reading a
+  secret through a variable (`ls $DEEPSEEK_API_KEY` prints the key in its error) and redirects. The denies win over
+  every allow rule: Claude Code always lets deny rules win, and in OpenCode they come after the allows, where the
+  last matching rule wins.
+  - **Claude Code:** the list is in `settings/claude-settings.json`. `run-agent.sh` passes it with `--settings`,
+    because in a `claude -p` run Claude Code ignores the allow rules of the project's `.claude/settings.json` (the
+    folder is never trusted). The agents run with `--permission-mode dontAsk`, so anything not allowed is refused.
+    Claude Code also checks each part of a compound command on its own.
+  - **OpenCode:** it is merged into `opencode.json` as `permission.bash`, together with edit limits (the test
+    directory, `results/` and `PR_BODY.md`) and `webfetch: deny`. The agent files only deny tools; an allow there
+    would override all of this.
+  - **Tested on the real engines.** `tests/engine-permissions/check.py` stages each engine as CI does and drives it
+    with a fake model, so no API key is needed. The tests check that `ls && env`, `ls; env`, `ls | env`,
+    `echo $(env)`, `ls` + line break + `env`, backticks, `$VAR`, redirects and a quoted `|` are refused without
+    running. They also check that `npx playwright test x.spec.ts`, `git status` and writing `results/triage.json`
+    still work, and that OpenCode refuses edits to application source. CI runs this on the engine versions the
+    workflows install by default.
+  - The test runners still execute code: a test file an agent writes can read the environment when it runs. Keep
+    the engine key's spending capped, as above.
 - **Checkouts use `persist-credentials: false`**, so agents can't push with the workflow token. Only
   `create-pull-request` pushes, after the guardrails pass.
 - **App secrets (`APP_ENV`) never reach an agent step.** Only test runs get them, masked in the logs; see
@@ -676,7 +700,9 @@ These are **not** detected by the script and must be checked by the reviewer (th
   - `write-summary.sh`: the same sample reports, an edge-case report and a triage file must produce the markdown in
     `tests/write-summary/*.expected.md`, and missing or broken input must still exit 0;
   - `fetch-spec.sh`: the Spec Kit folder must produce `003-feature.expected.md`;
-  - `stage-agents.sh`: staging is checked for both engines, including the tools each agent may use;
+  - `stage-agents.sh`: staging is checked for both engines, including the tools each agent may use, that an
+    OpenCode agent file allows nothing, and that the rules for shell metacharacters deny on both engines (in
+    OpenCode, after every allow rule);
   - `run-agent.sh`: the command lines are checked with stub `claude` / `opencode` executables;
   - `load-app-env.sh`: each `tests/load-app-env/*.env` must load its `*.expected` or fail on the lines its header
     names; no value may be printed outside `::add-mask::`; and no agent step or job-wide env in the workflows may
@@ -687,14 +713,18 @@ These are **not** detected by the script and must be checked by the reviewer (th
     stray reports) and must always exit 0;
   - `evals/triage/run-eval.py`: `--check` must accept the cases and reject a workspace file that gives an answer
     away. Runs with a stub engine must report the expected scores, mark a run that reads the answer key as
-    invalid, and say why an agent wrote no `triage.json`. On a scratch clone, hide mode must delete all of
-    `evals/` and the rest of the answer key before the agent looks for it, and must keep a `.git` that holds
-    uncommitted work.
+    invalid, and say why an agent wrote no `triage.json`. Each run must get its own folder, and a case's runs
+    must not overlap. On a scratch clone, hide mode must delete all of `evals/` and the rest of the answer key
+    before the agent looks for it, and must keep a `.git` that holds uncommitted work;
+  - agent permissions (`tests/engine-permissions/`): the real `claude` and `opencode`, staged as in CI and driven
+    by a fake model, must refuse chained, substituted, expanded and redirected commands, and must still run the
+    test command; see [Security](#security). Skipped for an engine that isn't installed, unless `REQUIRE_ENGINES=1`.
 - `.github/workflows/ci.yml` runs on every push and pull request:
   - `shellcheck` on the scripts;
   - `actionlint` on the workflows;
   - validation of the framework JSON, `settings/*.json`, `AGENT-RULES.md` and the agents' front matter;
-  - the fixture tests.
+  - the fixture tests, with Claude Code and OpenCode installed at the versions the workflows use by default, so
+    the permission tests always run there.
 - Planned work and the plan for evaluating the platform are in [`BACKLOG.md`](BACKLOG.md).
 - [`evals/README.md`](evals/README.md) describes the offline triage eval. The manual `eval-triage.yml` workflow
   runs it; `ci.yml` only checks it, without calling a model API.

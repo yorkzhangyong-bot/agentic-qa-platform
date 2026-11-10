@@ -41,9 +41,13 @@ case "$engine" in
       tools="$tools,mcp__${server}__*"
       mcp_args=(--mcp-config .mcp.json --strict-mcp-config)
     fi
+    # --settings: Claude Code ignores the allow rules in a project's .claude/settings.json until someone accepts the
+    # workspace trust dialog, which a `claude -p` run never shows, so a CI checkout never gets them; only deny and
+    # ask rules apply there. Settings passed on the command line come from whoever runs Claude Code, so they apply.
     claude -p "$prompt" \
       --agent "$agent" \
       --append-system-prompt-file "$platform/AGENT-RULES.md" \
+      --settings "$platform/settings/claude-settings.json" \
       --allowedTools "$tools" \
       "${mcp_args[@]}" \
       --permission-mode dontAsk \

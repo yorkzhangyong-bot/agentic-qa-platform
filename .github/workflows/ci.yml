@@ -2,8 +2,9 @@ name: ci
 
 # CI for this repository: lint the scripts and workflows, validate the configs, AGENT-RULES.md, the agent
 # definitions and the triage eval's cases, and run the fixture tests (anti-cheat.sh, parse-report.sh,
-# write-summary.sh, fetch-spec.sh, stage-agents.sh, run-agent.sh, report-defects.sh, load-app-env.sh, and the triage
-# eval with a stub engine). No step calls a model API; the real triage eval is the manual eval-triage.yml.
+# write-summary.sh, fetch-spec.sh, stage-agents.sh, run-agent.sh, report-defects.sh, load-app-env.sh, the triage
+# eval with a stub engine, and the agent permissions on the real Claude Code and OpenCode, driven by a fake model).
+# No step calls a model API; the real triage eval is the manual eval-triage.yml.
 
 on:
   push:
@@ -117,11 +118,29 @@ jobs:
   fixtures:
     name: Fixture tests
     runs-on: ubuntu-latest
+    env:
+      # The versions the workflows install by default; tests/run-tests.sh checks that they match.
+      CLAUDE_CODE_VERSION: "2.1.283"
+      OPENCODE_VERSION: "1.19.5"
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
           persist-credentials: false
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      # For the agent permission tests: the real engines, driven by a fake model, so no API key is needed.
+      - name: Install the agent engines
+        run: |
+          npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "opencode-ai@${OPENCODE_VERSION}"
+          claude --version
+          opencode --version
+
       - name: Script fixture tests
+        env:
+          REQUIRE_ENGINES: "1"
         run: bash tests/run-tests.sh
