@@ -12,9 +12,10 @@
 
 ## Evaluation of the platform
 ### Triage eval (in this repo)
-- [ ] Labelled failure cases in evals/triage/cases.jsonl (20 seed cases + real failures from consumer runs)
-- [ ] Script + manual workflow: accuracy, per-category accuracy, confusion table, critical count REAL_BUG→SELECTOR_DRIFT
-- [ ] Record model, engine version, prompt SHA per result
+- [x] Labelled failure cases in evals/triage/cases.jsonl (20 seed cases)
+- [ ] Add real failures from consumer runs to evals/triage/cases.jsonl
+- [x] Script + manual workflow: accuracy, per-category accuracy, confusion table, critical count REAL_BUG→SELECTOR_DRIFT
+- [x] Record model, engine version, prompt SHA per result
 
 ### Benchmark repo (separate consumer repo)
 - [ ] Small app + spec with FR/SC ids

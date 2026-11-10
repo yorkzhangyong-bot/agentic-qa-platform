@@ -24,6 +24,9 @@
 #                    must fail naming those lines and load nothing. No value may be printed outside ::add-mask::.
 #                    Also: CRLF, empty values, % in masks, -- COMMAND, --check, and a guard that no agent step and
 #                    no job-wide env in the workflows gets APP_ENV.
+#   evals/triage/run-eval.py  --check accepts evals/triage/cases.jsonl and rejects a bad label; a run with a stub
+#                    engine (every failure SELECTOR_DRIFT, 3 cases x 2 runs) must report the expected scores, the CI
+#                    prompt and the result-file metadata. No model API is called.
 #
 # Usage: bash tests/run-tests.sh          (exit code 0 when every check passes)
 set -euo pipefail
@@ -630,6 +633,72 @@ then
   ok "agents-never-get-app-env"
 else
   bad "agents-never-get-app-env" "$(cat "$work/app-env-guard.log")"
+fi
+
+echo
+echo "evals/triage/run-eval.py"
+set +e
+(cd "$root" && python3 evals/triage/run-eval.py --check > "$work/eval-check.log" 2>&1)
+code=$?
+set -e
+check_texts eval-cases-are-valid "$work/eval-check.log" "+cases OK" "-warning"
+printf '%s\n' '{"id": "x", "file": "tests/x.spec.ts", "name": "n", "error": "e", "expected": "BUG", "why": "w"}' \
+  > "$work/eval-bad.jsonl"
+set +e
+(cd "$root" && python3 evals/triage/run-eval.py --check --cases "$work/eval-bad.jsonl" > "$work/eval-bad.log" 2>&1)
+code=$?
+set -e
+if [ "$code" -eq 1 ] && grep -qF "expected must be one of" "$work/eval-bad.log"; then
+  ok "eval-rejects-a-bad-label"
+else
+  bad "eval-rejects-a-bad-label" "exit $code"$'\n'"$(cat "$work/eval-bad.log")"
+fi
+# End to end with a stub engine that calls every failure SELECTOR_DRIFT: 3 cases x 2 runs.
+eval_bin="$work/eval-bin"
+mkdir -p "$eval_bin"
+cat > "$eval_bin/claude" <<'STUB'
+#!/usr/bin/env bash
+# Stub engine for the triage eval: records its arguments and calls every failure SELECTOR_DRIFT.
+if [ "${1:-}" = --version ]; then echo "9.9.9 (Claude Code)"; exit 0; fi
+printf '%s\n' "$@" >> "$EVAL_STUB_ARGS"
+python3 - "$EXPECTED_OUTPUT" <<'PY'
+import json
+import sys
+
+failures = json.load(open("results/failures.json", encoding="utf-8"))
+items = [{"name": f["name"], "classname": f["classname"], "file": f["file"], "classification": "SELECTOR_DRIFT",
+          "reason": "stub verdict"} for f in failures]
+json.dump({"framework": "playwright", "items": items}, open(sys.argv[1], "w", encoding="utf-8"))
+PY
+STUB
+chmod +x "$eval_bin/claude"
+cat > "$work/eval-cases.jsonl" <<'JSONL'
+{"id": "drift", "file": "tests/e2e-browser/login.spec.ts", "name": "logs in with valid credentials", "error": "locator.click: Timeout 10000ms exceeded. waiting for getByTestId('login-btn').", "expected": "SELECTOR_DRIFT", "why": "never-shown-to-the-agent"}
+{"id": "bug", "file": "tests/e2e-browser/checkout.spec.ts", "name": "shows correct total", "error": "expect(received).toBe(expected) Expected: \"$30.00\" Received: \"$300.00\".", "expected": "REAL_BUG", "why": "never-shown-to-the-agent"}
+{"id": "env", "file": "tests/e2e-browser/app.spec.ts", "name": "home page loads", "error": "page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:8501/", "expected": "ENV", "why": "never-shown-to-the-agent"}
+JSONL
+set +e
+(cd "$root" && env PATH="$eval_bin:$PATH" EVAL_STUB_ARGS="$work/eval-args.txt" SKIP_MCP_WARMUP=1 \
+  GITHUB_STEP_SUMMARY="$work/eval-summary.md" python3 evals/triage/run-eval.py --engine claude \
+  --cases "$work/eval-cases.jsonl" --repeats 2 --jobs 1 --out "$work/eval-results" --work-dir "$work/eval-run" --keep \
+  > "$work/eval.log" 2>&1)
+code=$?
+set -e
+{ cat "$work/eval-summary.md" "$work/eval-results/$(date -u +%Y-%m-%d)-claude-default.json" "$work/eval-args.txt" \
+    "$work/eval.log"; } > "$work/eval-transcript" 2> /dev/null || true
+check_texts eval-run-with-stub-engine "$work/eval-transcript" \
+  "+**Accuracy** 2/6 (33%)" "+**Critical: REAL_BUG classified as SELECTOR_DRIFT** 2" \
+  "+3/3 cases gave the same answer in all 2 runs" "+| REAL_BUG | 2 | 0 | 0 | 0 | 0 |" \
+  "+| SELECTOR_DRIFT | 2/2 (100%) |" "+| bug | shows correct total | REAL_BUG | SELECTOR_DRIFT " "+stub verdict" \
+  "-| drift |" "+\"engine_version\": \"9.9.9 (Claude Code)\"" "+\"model\": \"default\"" \
+  "+\"blob\": \"$(git -C "$root" hash-object agents/common/triage.md)\"" \
+  "+Triage every failure in results/failures.json" "+App URL: not provided." "+--max-turns"
+# The answer must never reach the agent: no workspace may contain a case's "why".
+kept="$(find "$work/eval-run/workspaces" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+if [ "$kept" -eq 6 ] && ! grep -rqF "never-shown-to-the-agent" "$work/eval-run/workspaces"; then
+  ok "eval-workspaces-hide-the-answer"
+else
+  bad "eval-workspaces-hide-the-answer" "$kept workspaces kept; the why text is in:"$'\n'"$(grep -rlF never-shown-to-the-agent "$work/eval-run/workspaces" | head -n 3)"
 fi
 
 echo

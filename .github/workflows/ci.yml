@@ -1,8 +1,9 @@
 name: ci
 
-# CI for this repository: lint the scripts and workflows, validate the configs, AGENT-RULES.md and the agent
-# definitions, and run the fixture tests (anti-cheat.sh, parse-report.sh, write-summary.sh, fetch-spec.sh,
-# stage-agents.sh, run-agent.sh, report-defects.sh, load-app-env.sh).
+# CI for this repository: lint the scripts and workflows, validate the configs, AGENT-RULES.md, the agent
+# definitions and the triage eval's cases, and run the fixture tests (anti-cheat.sh, parse-report.sh,
+# write-summary.sh, fetch-spec.sh, stage-agents.sh, run-agent.sh, report-defects.sh, load-app-env.sh, and the triage
+# eval with a stub engine). No step calls a model API; the real triage eval is the manual eval-triage.yml.
 
 on:
   push:
@@ -107,6 +108,11 @@ jobs:
               print(f"::error::{error}")
           sys.exit(1 if errors else 0)
           PY
+
+      - name: Triage eval (syntax and cases only; no agent, no API calls)
+        run: |
+          python3 -m py_compile evals/triage/run-eval.py
+          python3 evals/triage/run-eval.py --check
 
   fixtures:
     name: Fixture tests

@@ -1,0 +1,124 @@
+name: eval-triage
+
+# Offline evaluation of the triage agent (agents/common/triage.md): replays the labelled failures in
+# evals/triage/cases.jsonl through the real agent, one temporary CI-like workspace per case and run, and reports the
+# accuracy, the per-category accuracy, a confusion table and the critical count (REAL_BUG classified as
+# SELECTOR_DRIFT). Manual only, because every case is a paid agent run. See evals/README.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      engine:
+        description: Agent engine.
+        type: choice
+        options: [claude, opencode]
+        default: claude
+      opencode_model:
+        description: Model for engine opencode, as provider/model.
+        type: string
+        default: deepseek/deepseek-flash
+      claude_model:
+        description: Optional model for engine claude (sets ANTHROPIC_MODEL). Empty uses Claude Code's default.
+        type: string
+        default: ""
+      repeats:
+        description: Runs per case. More than 1 measures how consistent the answers are.
+        type: number
+        default: 1
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eval-triage
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  eval:
+    name: Triage eval (${{ inputs.engine }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      ENGINE: ${{ inputs.engine }}
+      OPENCODE_MODEL: ${{ inputs.opencode_model }}
+      CLAUDE_MODEL: ${{ inputs.claude_model }}
+      # The versions test-and-heal.yml installs by default.
+      CLAUDE_CODE_VERSION: "2.1.283"
+      OPENCODE_VERSION: "1.19.5"
+      PLAYWRIGHT_MCP_VERSION: "0.0.84"
+    steps:
+      - name: Check engine credentials
+        env:
+          HAS_ANTHROPIC: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+          HAS_DEEPSEEK: ${{ secrets.DEEPSEEK_API_KEY != '' }}
+          HAS_OPENROUTER: ${{ secrets.OPENROUTER_API_KEY != '' }}
+          HAS_OPENAI: ${{ secrets.OPENAI_API_KEY != '' }}
+        run: |
+          if [ "$ENGINE" = claude ]; then
+            [ "$HAS_ANTHROPIC" = true ] || { echo "::error::engine claude needs the ANTHROPIC_API_KEY secret in this repository."; exit 1; }
+          else
+            provider="${OPENCODE_MODEL%%/*}"
+            case "$provider" in
+              deepseek) has="$HAS_DEEPSEEK"; key=DEEPSEEK_API_KEY ;;
+              openrouter) has="$HAS_OPENROUTER"; key=OPENROUTER_API_KEY ;;
+              openai) has="$HAS_OPENAI"; key=OPENAI_API_KEY ;;
+              *) echo "::error::opencode_model '$OPENCODE_MODEL' uses provider '$provider'; the eval has keys for deepseek, openrouter and openai."; exit 1 ;;
+            esac
+            [ "$has" = true ] || { echo "::error::opencode_model '$OPENCODE_MODEL' needs the $key secret in this repository."; exit 1; }
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # the result file records the last commit that changed agents/common/triage.md
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      - name: Install agent engine
+        run: |
+          if [ "$ENGINE" = opencode ]; then
+            npm install -g "opencode-ai@${OPENCODE_VERSION}"
+            opencode --version
+          else
+            npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+            claude --version
+          fi
+
+      - name: Run the triage eval
+        env:
+          ANTHROPIC_API_KEY: ${{ inputs.engine == 'claude' && secrets.ANTHROPIC_API_KEY || '' }}
+          DEEPSEEK_API_KEY: ${{ inputs.engine == 'opencode' && secrets.DEEPSEEK_API_KEY || '' }}
+          OPENROUTER_API_KEY: ${{ inputs.engine == 'opencode' && secrets.OPENROUTER_API_KEY || '' }}
+          OPENAI_API_KEY: ${{ inputs.engine == 'opencode' && secrets.OPENAI_API_KEY || '' }}
+          REPEATS: ${{ inputs.repeats }}
+        run: |
+          model="$OPENCODE_MODEL"
+          if [ "$ENGINE" = claude ]; then model="$CLAUDE_MODEL"; fi
+          python3 evals/triage/run-eval.py --engine "$ENGINE" ${model:+--model "$model"} --repeats "$REPEATS" \
+            --jobs 4 --work-dir "$RUNNER_TEMP/triage-eval"
+
+      - name: Upload the result file
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: triage-eval-results
+          path: evals/triage/results/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Upload the agents' logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: triage-eval-logs
+          path: ${{ runner.temp }}/triage-eval/logs/
+          if-no-files-found: ignore
+          retention-days: 30

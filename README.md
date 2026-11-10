@@ -178,10 +178,12 @@ OpenCode's known gaps:
 │   ├── report-defects/          triage + failures fixtures, expected candidates, sample defect reports
 │   ├── load-app-env/            APP_ENV fixtures (*.env) + expected $GITHUB_ENV
 │   └── fetch-spec/              Spec Kit folder fixture + expected spec.md
+├── evals/                       offline evaluations (evals/README.md): triage cases, sample project, runner
 ├── .github/workflows/
 │   ├── _select-framework.yml    validates the engine, reads frameworks/<framework>.json → outputs
 │   ├── test-and-heal.yml        reusable: test → triage → heal → PR, and report-defects → issues
 │   ├── generate-tests.yml       reusable: spec → plan → tests → PR
+│   ├── eval-triage.yml          manual: offline evaluation of the triage agent
 │   └── ci.yml                   CI for this repository
 └── templates/                   caller workflows for consumer repos
     ├── caller-test-and-heal.yml
@@ -682,13 +684,17 @@ These are **not** detected by the script and must be checked by the reviewer (th
   - `report-defects.sh`: `prepare` must produce `defect-candidates.expected.json`, and fingerprints must match
     their definition, stay the same when timings, ids and line numbers change, and change with the error;
     `publish` runs against a stub `gh` (new issues, a comment on an open issue, failed `gh` calls, missing and
-    stray reports) and must always exit 0.
+    stray reports) and must always exit 0;
+  - `evals/triage/run-eval.py`: `--check` must accept the cases, and a run with a stub engine must report the
+    expected scores.
 - `.github/workflows/ci.yml` runs on every push and pull request:
   - `shellcheck` on the scripts;
   - `actionlint` on the workflows;
   - validation of the framework JSON, `settings/*.json`, `AGENT-RULES.md` and the agents' front matter;
   - the fixture tests.
 - Planned work and the plan for evaluating the platform are in [`BACKLOG.md`](BACKLOG.md).
+- [`evals/README.md`](evals/README.md) describes the offline triage eval. The manual `eval-triage.yml` workflow
+  runs it; `ci.yml` only checks it, without calling a model API.
 
 ## License
 
