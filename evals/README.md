@@ -101,6 +101,24 @@ run of each case gets its own folder, `trials/<id>-r<n>/` in the work directory:
 
 ### Cases
 
+`triage/cases.jsonl` holds 31 cases:
+
+- **T01 to T20, the seed cases.** Each has a one-line error that carries its own evidence.
+- **T21 to T23, real failures from Kestrel.** They come from Kestrel's `test-and-heal` runs 42612500123 and
+  42629695684, which hit the same 14 ENV failures. These three cover the three error shapes among them, in
+  Playwright's own report text. Only three things changed: the checkout path is the eval's, Chromium's browser
+  logs and the trace attachments are left out, and one call-log line cut off in storage was restored from that
+  run's failure summary. Their tests (`tests/e2e-browser/adaptive-attack.spec.ts`, its fixtures and the page object
+  `tests/pages/KestrelApp.ts`) are copied unchanged from `yorkzhangyong-bot/kestrel` at `d1797037` (MIT licence).
+- **T24 to T31, boundary cases.** Each sits where two labels are easy to confuse under the triage agent's decision
+  rules. Their errors use Playwright's report format, with the call log, a code frame generated from the sample
+  project, and both CI attempts.
+
+A one-line error is completed the way Playwright prints it: `Error: …` plus the failing line. A multi-line error is
+the reporter's whole text and is used unchanged. There is no app to inspect. So a case that needs page evidence
+includes a `# Page snapshot` after its first `Error Context:` line, the accessibility snapshot Playwright saves in
+`error-context.md` on failure.
+
 | Field | Meaning |
 |---|---|
 | `id` | unique id: letters, digits, `.`, `_`, `-` |
@@ -112,8 +130,11 @@ run of each case gets its own folder, `trials/<id>-r<n>/` in the work directory:
 | `rerun` | optional: `fail` (default) or `pass`, what a re-run by the agent shows |
 
 To add a case, add its line and make sure `triage/project/` has the test, so the failing step exists. Without the
-test file, the workspace gets a stub test, and `--check` warns. For a real failure from a consumer run, copy `name`,
-`file` and `message` from that run's `results/failures.json`, label it, and add the test.
+test file, the workspace gets a stub test, and `--check` warns. For a real failure from a consumer run, take it from
+that run's `results/failures.json`:
+- copy `name` and `file`;
+- use the `stack` without its first line as `error`, removing secrets and long browser logs;
+- label it, and add the test file it ran, with the helpers it imports.
 
 ### Run it
 
@@ -128,7 +149,7 @@ test file, the workspace gets a stub test, and `--check` warns. For a real failu
 
 The engine's key must be a secret of this repository: `ANTHROPIC_API_KEY`, or `DEEPSEEK_API_KEY`. For other OpenCode
 providers, use `OPENROUTER_API_KEY` or `OPENAI_API_KEY`. Every case is one agent run of up to 15 turns, 4 at a time,
-so 20 cases cost 20 triage runs per repeat.
+so 31 cases cost 31 triage runs per repeat.
 
 **Locally**, with the engine CLI installed and either logged in or its key set:
 

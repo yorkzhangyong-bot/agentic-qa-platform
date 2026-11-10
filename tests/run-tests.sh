@@ -30,7 +30,8 @@
 #                    result-file metadata and the engine's full-transcript flags (claude and opencode); a run whose
 #                    log quotes the answer key is invalid; opencode's database is created before the parallel runs;
 #                    and a missing triage.json is explained (startup error, turn limit, timeout, rejected permission,
-#                    wrong place, last message). Hide mode (CI set) runs on a scratch clone: it must delete all of
+#                    wrong place, last message); a multi-line error (a reporter's own text) reaches the JUnit report
+#                    unchanged. Hide mode (CI set) runs on a scratch clone: it must delete all of
 #                    evals/ and the rest of the answer key, .git included, before the stub agent looks for it, report
 #                    that agent's run as invalid and unscored, and refuse to delete a .git with uncommitted work. No
 #                    model API is called.
@@ -889,6 +890,35 @@ check_texts eval-explains-missing-output "$work/eval-missing.log" \
   "+tried: tried to write /tmp/triage.json instead of results/triage.json" \
   "+last-words: the agent stopped without writing it (opencode exit code 0); its last message: \"No idea.\"" \
   "+wrong-place: wrote triage.json instead of results/triage.json"
+# A multi-line error is the reporter's own text (the real Kestrel cases, the boundary cases) and must reach the JUnit
+# report unchanged; a one-line error is completed the way Playwright prints it.
+set +e
+python3 - "$root/evals/triage/run-eval.py" > "$work/eval-junit.log" 2>&1 <<'PY'
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("run_eval", sys.argv[1])
+run_eval = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(run_eval)
+case = {"file": "tests/e2e-browser/x.spec.ts", "name": "x"}
+at = f"        at {run_eval.CI_CHECKOUT}/tests/e2e-browser/x.spec.ts:7:3"
+problems = []
+_, multi = run_eval.junit(dict(case, error="Test timeout of 60000ms exceeded.\n\nError: locator.click: Test timeout of "
+                                           "60000ms exceeded.\nCall log:\n  - waiting for getByRole('button')"), 3, 1, 7, 3)
+lines = multi.splitlines()
+if "    Test timeout of 60000ms exceeded." not in lines or "      - waiting for getByRole('button')" not in lines:
+    problems.append("the multi-line error was changed:\n" + multi)
+if "Error: Test timeout" in multi or at in lines:
+    problems.append("the eval added its own 'Error: ' or 'at' line to the reporter's text:\n" + multi)
+_, one = run_eval.junit(dict(case, error="locator.click: Timeout 10000ms exceeded."), 3, 1, 7, 3)
+if "    Error: locator.click: Timeout 10000ms exceeded." not in one.splitlines() or at not in one.splitlines():
+    problems.append("the one-line error wasn't completed:\n" + one)
+print("\n".join(problems) or "the reporter's text is kept")
+sys.exit(1 if problems else 0)
+PY
+code=$?
+set -e
+if [ "$code" -eq 0 ]; then ok "eval-keeps-the-reporter-text"; else bad "eval-keeps-the-reporter-text" "$(cat "$work/eval-junit.log")"; fi
 
 # Hide mode, the default when CI is set, on a scratch clone of this repository whose answer key is the stub cases,
 # plus an old result file and a note that quotes a case's "why". All of evals/ must be gone before the first agent

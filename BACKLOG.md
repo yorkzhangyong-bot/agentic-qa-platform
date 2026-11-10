@@ -13,8 +13,9 @@
 
 ## Evaluation of the platform
 ### Triage eval (in this repo)
-- [x] Labelled failure cases in evals/triage/cases.jsonl (20 seed cases)
-- [ ] Add real failures from consumer runs to evals/triage/cases.jsonl
+- [x] Labelled failure cases in evals/triage/cases.jsonl (20 seed cases, 8 boundary cases)
+- [x] Add real failures from consumer runs to evals/triage/cases.jsonl (3 of Kestrel's 14 ENV failures)
+- [ ] Real consumer failures with labels other than ENV
 - [x] Script + manual workflow: accuracy, per-category accuracy, confusion table, critical count REAL_BUG→SELECTOR_DRIFT
 - [x] Record model, engine version, prompt SHA per result
 

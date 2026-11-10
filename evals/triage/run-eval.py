@@ -441,14 +441,19 @@ def failing_line(lines, decl, error):
 
 
 def junit(case, decl, decl_col, at_line, at_col):
-    """A Playwright JUnit report with the one failure, and the failure text (as the line reporter prints it)."""
+    """A Playwright JUnit report with the one failure, and the failure text (as the line reporter prints it). A
+    one-line error is completed as Playwright would print it: "<ErrorClass>: …" and the failing line. A multi-line
+    error is the reporter's own text (with its call log, code frame and retries) and is used as it is."""
     rel = case["file"][len(TEST_DIR) + 1:]
     error = case["error"].strip()
-    if not re.match(r"\w*(?:Error|Exception)\b", error):
-        error = f"Error: {error}"  # Playwright prints a thrown error as "<ErrorClass>: <message>"
     header = f"[chromium] {SEP} {rel}:{decl}:{decl_col} {SEP} {case['name']}"
-    text = "\n".join([f"  {header}", "", *(f"    {line}" for line in error.splitlines()), "",
-                      f"        at {CI_CHECKOUT}/{case['file']}:{at_line}:{at_col}"])
+    if "\n" in error:
+        body = [f"    {line}" if line.strip() else "" for line in error.splitlines()]
+    else:
+        if not re.match(r"\w*(?:Error|Exception)\b", error):
+            error = f"Error: {error}"  # Playwright prints a thrown error as "<ErrorClass>: <message>"
+        body = [f"    {error}", "", f"        at {CI_CHECKOUT}/{case['file']}:{at_line}:{at_col}"]
+    text = "\n".join([f"  {header}", "", *body])
     suites = ET.Element("testsuites", {"id": "", "name": "", "tests": "1", "failures": "1", "skipped": "0",
                                        "errors": "0", "time": "14.2"})
     suite = ET.SubElement(suites, "testsuite", {"name": rel, "timestamp": "2026-01-15T10:05:00.000Z",
