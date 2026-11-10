@@ -227,13 +227,15 @@ jobs:
         if: always()
         env:
           REPORT_GLOB: ${{ needs.config.outputs.report_glob }}
+          ERROR_CONTEXT_GLOB: ${{ needs.config.outputs.error_context_glob }}
         run: |
           shopt -s globstar nullglob
           dest="$RUNNER_TEMP/test-results"
           mkdir -p "$dest"
           report_dir="$(dirname "$REPORT_GLOB")"
-          # Copy results/** and the report directory, keeping repo-relative paths so `triage` can restore them.
-          for f in results/** $report_dir/** $REPORT_GLOB; do
+          # Copy results/**, the report directory and, for Playwright, each failed attempt's error-context.md (its
+          # errors, page snapshot and test source), keeping repo-relative paths so `triage` and `heal` can restore them.
+          for f in results/** $report_dir/** $REPORT_GLOB $ERROR_CONTEXT_GLOB; do
             if [ -f "$f" ]; then
               mkdir -p "$dest/$(dirname "$f")"
               cp "$f" "$dest/$f"
@@ -348,6 +350,8 @@ jobs:
             echo "::endgroup::"
           done <<< "$INSTALL_SCRIPT"
 
+      # Restores the reports and, for Playwright, test-results/<folder>/error-context.md: the path that each failure's
+      # "Error Context:" line names, where the triage agent reads it.
       - name: Download test results
         continue-on-error: true
         uses: actions/download-artifact@v8
@@ -516,6 +520,34 @@ jobs:
         with:
           name: triage
           path: results
+
+      # The failures' error-context.md files (Playwright), at the paths their "Error Context:" lines name, as in triage.
+      # Only these files: the original reports stay out of this job. A test run empties test-results/, so they are
+      # there until the healer's first run.
+      - name: Download the test results
+        id: test_results
+        if: needs.config.outputs.error_context_glob != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: test-results
+          path: ${{ runner.temp }}/test-results
+
+      - name: Restore the failures' error context
+        if: steps.test_results.outcome == 'success'
+        env:
+          ERROR_CONTEXT_GLOB: ${{ needs.config.outputs.error_context_glob }}
+        run: |
+          shopt -s globstar nullglob
+          src="$RUNNER_TEMP/test-results"
+          count=0
+          for f in "$src"/$ERROR_CONTEXT_GLOB; do
+            rel="${f#"$src"/}"
+            mkdir -p "$(dirname "$rel")"
+            cp "$f" "$rel"
+            count=$((count + 1))
+          done
+          echo "Restored $count error-context file(s)."
 
       # Masks the APP_ENV values in this job's logs before any agent runs. Only the verification run gets the values.
       - name: Check APP_ENV

@@ -30,6 +30,10 @@ on:
         description: Runs per case. More than 1 measures how consistent the answers are.
         type: number
         default: 1
+      snapshots:
+        description: Give each case the error-context.md files (page snapshot) that test-and-heal gives triage for Playwright. Off measures triage without them.
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -104,6 +108,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ inputs.engine == 'opencode' && secrets.OPENROUTER_API_KEY || '' }}
           OPENAI_API_KEY: ${{ inputs.engine == 'opencode' && secrets.OPENAI_API_KEY || '' }}
           REPEATS: ${{ inputs.repeats }}
+          SNAPSHOTS: ${{ inputs.snapshots && '--snapshots' || '--no-snapshots' }}
         run: |
           model="$OPENCODE_MODEL"
           if [ "$ENGINE" = claude ]; then model="$CLAUDE_MODEL"; fi
@@ -111,7 +116,7 @@ jobs:
           # checkout (all of evals/, every other file that gives an answer away, .git) before the first agent starts.
           # The result file is written to evals/triage/results/ after the last agent finished.
           python3 evals/triage/run-eval.py --hide-answers --engine "$ENGINE" ${model:+--model "$model"} \
-            --repeats "$REPEATS" --jobs 4 --work-dir "$RUNNER_TEMP/triage-eval"
+            --repeats "$REPEATS" "$SNAPSHOTS" --jobs 4 --work-dir "$RUNNER_TEMP/triage-eval"
 
       - name: Upload the result file
         if: always()

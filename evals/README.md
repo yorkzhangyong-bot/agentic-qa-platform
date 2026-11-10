@@ -24,6 +24,7 @@ For every case, and every repeat, `run-eval.py` builds a temporary workspace tha
 | `.agentic-qa/`: this platform's agents, `AGENT-RULES.md`, frameworks, scripts and settings | the platform checkout |
 | `results/junit.xml`: a Playwright JUnit report holding the case's failure | the `test-results` artifact |
 | `results/failures.json`, written from it by `scripts/parse-report.sh` | the "Parse JUnit report" step |
+| `test-results/<folder>/error-context.md` for each attempt: what Playwright saved, with the page snapshot where the case has one (not with `--no-snapshots`) | the `test-results` artifact |
 | the agent and engine config staged by `scripts/stage-agents.sh` | the "Stage agents" step |
 
 It then runs the agent through `scripts/run-agent.sh`. The triage step's prompt, turn budget (15) and output file are
@@ -34,7 +35,7 @@ label. A case's `expected` and `why` never reach the workspace.
 What differs from CI, because the eval is offline:
 
 - **No app is running.** The prompt says "App URL: not provided", as in a CI run without `app_url`. The agent judges
-  from the error, the test and the git history.
+  from the error, the page snapshot in `error-context.md`, the test and the git history.
 - **Re-runs are replayed.** If the agent re-runs the test, `npx playwright test` prints the recorded failure again
   (`node_modules/.bin/playwright` in the workspace). A case can set `"rerun": "pass"` to make the replay pass.
 - **The log is a full transcript.** The engine prints its JSON event stream, with every tool call and its result,
@@ -116,9 +117,40 @@ run of each case gets its own folder, `trials/<id>-r<n>/` in the work directory:
   project, and both CI attempts.
 
 A one-line error is completed the way Playwright prints it: `Error: …` plus the failing line. A multi-line error is
-the reporter's whole text and is used unchanged. There is no app to inspect. So a case that needs page evidence
-includes a `# Page snapshot` after its first `Error Context:` line, the accessibility snapshot Playwright saves in
-`error-context.md` on failure.
+the reporter's whole text.
+
+There is no app to inspect, so every attempt that failed on a loaded page carries its page snapshot. It's a
+`# Page snapshot` line, a blank line, then a ```` ```yaml ```` block, placed after the attempt's text (for a
+one-line error, after the line). It is what Playwright saves in `error-context.md` when a test fails: the
+accessibility tree of the page, from `page.ariaSnapshot()` in its "ai" mode, with refs and `[cursor=pointer]`. It
+shows the page the test was on, with what the error and the test describe, and nothing else.
+
+A case whose page never loaded anything has no snapshot, because Playwright writes none for an empty page:
+- T17: the navigation was refused;
+- T19: there was no browser;
+- T21 and T22: the test failed before it opened the app;
+- T27: a database helper failed before `page.goto`.
+
+Two things change between the error and the report:
+
+- **The page snapshot leaves the report**, because Playwright doesn't print it there. With `--snapshots`, the
+  default, it goes into that attempt's `error-context.md`; with `--no-snapshots` it is gone.
+- **Every attempt ends with an `Error Context:` line**, which Playwright 1.65 prints for each failed attempt. An
+  attempt without one gets it. Its folder is the first attempt's plus `-retry<n>`, or, if the error names none, the
+  one Playwright would use for this test in the sample project (`../test-results/<folder>/error-context.md`,
+  relative to its `tests/` test directory).
+
+The report is the same in both modes; only the files differ. Each file is at `test-results/<folder>/` in the
+workspace, where the triage job restores it from the `test-results` artifact. It holds what Playwright writes:
+
+- its `# Instructions` for a coding assistant;
+- the test's name and location;
+- the attempt's errors, without code frames or stack;
+- the page snapshot, unless the page never loaded;
+- the test source around the failing line, from the sample project.
+
+Nothing else goes in, so no label and no `why`. `--check` also makes sure each case's report and files give no
+answer away.
 
 | Field | Meaning |
 |---|---|
@@ -147,6 +179,7 @@ that run's `results/failures.json`:
 | `opencode_model` | `deepseek/deepseek-flash` | `provider/model` for OpenCode |
 | `claude_model` | empty | model for Claude Code (`ANTHROPIC_MODEL`); empty uses its default |
 | `repeats` | `1` | runs per case; `3` measures consistency |
+| `snapshots` | on | give each case its `error-context.md` files; off measures triage without page snapshots |
 
 The engine's key must be a secret of this repository: `ANTHROPIC_API_KEY`, or `DEEPSEEK_API_KEY`. For other OpenCode
 providers, use `OPENROUTER_API_KEY` or `OPENAI_API_KEY`. Every case is one agent run of up to 15 turns, 4 at a time,
@@ -169,7 +202,8 @@ Other options:
 - `--cases`, `--only`;
 - `--out` (result directory), `--work-dir` (the runs' folders; must be outside the repository, and new or empty);
 - `--keep` (keep each run's workspace in its folder);
-- `--hide-answers` / `--no-hide-answers` (default: on when `CI` is set).
+- `--hide-answers` / `--no-hide-answers` (default: on when `CI` is set);
+- `--snapshots` / `--no-snapshots` (default: on): whether each case gets its `error-context.md` files.
 
 ### Output
 
@@ -199,7 +233,9 @@ invalid run. It also records what's needed to compare scores over time:
 - `triage_md.blob`: the git object id of `agents/common/triage.md` as tested. The same text always has the same id.
 - `triage_md.commit`, the last commit that changed it, and `triage_md.modified` for local changes;
 - `agent_rules_blob`, `platform_commit`, the prompt, the turn budget, and a hash of the cases file;
-- `deleted_before_agents`: what `--hide-answers` deleted.
+- `deleted_before_agents`: what `--hide-answers` deleted;
+- `snapshots`: whether the cases had their `error-context.md` files. Without them, the file name ends in
+  `-no-snapshots`.
 
 The workflow uploads the result file as the artifact `triage-eval-results`, and each run's `agent.log` and
 `result.json` as `triage-eval-logs`. To keep the history, commit the result file to `evals/triage/results/`, and
@@ -221,9 +257,22 @@ than one run per case.
 | 2026-11-10 | `7733701` | `36a02d1` | first 20-case set after permission and isolation fixes | opencode 1.19.5, `deepseek/deepseek-flash` | 20 × 1 | 20/20 (100%) | 0 | 0 | — | [42804483276](https://github.com/yorkzhangyong-bot/agentic-qa-platform/actions/runs/42804483276) |
 | 2026-11-10 | `22990d6` | `36a02d1` | 31 cases: added real Kestrel and tricky cases | opencode 1.19.5, `deepseek/deepseek-flash` | 31 × 3 | 84/90 (93%) | 0 | 3 | 27/31 | [42813980294](https://github.com/yorkzhangyong-bot/agentic-qa-platform/actions/runs/42813980294) |
 | 2026-11-10 | `6d66802` | `6d66802` | agents continue after denied paths; FLAKY and ENV triage rules | opencode 1.19.5, `deepseek/deepseek-flash` | 31 × 3 | 90/93 (97%) | 0 | 0 | 31/31 | [42830002351](https://github.com/yorkzhangyong-bot/agentic-qa-platform/actions/runs/42830002351) |
+| 2026-11-10 | `743be99` | `743be99` | Playwright's error-context.md for each attempt, a page snapshot in 4 cases; snapshots on | opencode 1.19.5, `deepseek/deepseek-flash` | 31 × 3 | 89/93 (96%) | 0 | 0 | 30/31 | [42851132289](https://github.com/yorkzhangyong-bot/agentic-qa-platform/actions/runs/42851132289) |
+| 2026-11-10 | `743be99` | `743be99` | the same, snapshots off | opencode 1.19.5, `deepseek/deepseek-flash` | 31 × 3 | 87/93 (94%) | 0 | 0 | 31/31 | [42854283500](https://github.com/yorkzhangyong-bot/agentic-qa-platform/actions/runs/42854283500) |
 
 The first row used a smaller, easier case set, the 20 seed cases, so it isn't directly comparable with the rows
 after it.
+
+The first three runs came before `error-context.md`: the cases that have a page snapshot had it inside the error
+text, and the others had no `Error Context:` line. From now on, write in "What changed" whether a run had snapshots.
+
+On `743be99` only 4 cases had a page snapshot, the ones that had it in the error text before:
+- **T25** was right in all 3 runs with snapshots and wrong in all 3 without.
+- **T05** missed once with snapshots: its error-context.md had no page snapshot, and the agent took that as evidence
+  against the error message.
+
+After `743be99`, every case whose page had loaded has a snapshot, so later runs aren't directly comparable with
+these two.
 
 ### Known hard cases
 

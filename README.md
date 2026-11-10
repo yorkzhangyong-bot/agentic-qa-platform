@@ -294,9 +294,12 @@ How it runs:
 - **`config`** validates `engine` and reads the framework config.
 - **`test`** checks out the commit under test and outputs its SHA. For pull requests that is the PR head commit,
   not GitHub's merge commit. It runs the suite with `continue-on-error`, writes the [job summary](#job-summary)
-  and always uploads the `test-results` artifact.
+  and always uploads the `test-results` artifact: `results/`, the reports and, for Playwright, the
+  `error-context.md` Playwright saves for each failed attempt (the errors, a page snapshot and the test source).
 - **`triage`** runs only when the tests failed, and is skipped for pull requests from forks, which don't receive
   secrets. It checks out exactly the SHA the test job tested.
+  - It restores the `test-results` artifact, so each `error-context.md` is where its failure's `Error Context:`
+    line points. The triage agent reads them.
   - It runs the triage agent, then writes the [job summary](#job-summary) again, with each failure's
     classification and reason.
   - It uploads `results/triage.json` and `results/failures.json` as the `triage` artifact, which the next two jobs
@@ -306,6 +309,8 @@ How it runs:
     agent wrote no `results/triage.json`, or the file classifies none of the failures. If it classifies only some
     of them, a warning says so.
 - **`heal`** runs only if triage found `SELECTOR_DRIFT` items. It gets `contents: write` and `pull-requests: write`.
+  - For Playwright it restores the failures' `error-context.md` files at the same paths, and nothing else from the
+    test run. A test run empties `test-results/`, so they stay until the healer's first run.
   - The job fails if the healer doesn't write its report.
   - If the healer changed files, a verification run executes the suite once more, with `APP_ENV`, before
     anti-cheat. Its results go to the job summary ("Test results after healing") and to the PR description; they
@@ -364,6 +369,7 @@ compact JSON. It also outputs these derived values:
 - `install_script`: the install commands, one per line.
 - `forbidden_paths_csv`: the forbidden paths, comma-separated.
 - `runtime`: `java` if the commands use Maven or Gradle, otherwise `node`.
+- `error_context_glob`: the optional key's value, or empty if the config has none.
 - `engine`: the validated engine.
 
 ## App secrets (`APP_ENV`)
@@ -403,8 +409,9 @@ aren't visible to reusable workflows, so they would arrive empty.
 **Masking:**
 - Every value is masked in the logs with `::add-mask::`, so use `APP_ENV` for secrets only: a short value such as
   `1` would be masked everywhere.
-- Masking covers logs, not files. Don't let the app put secrets into error messages, reports, traces or screenshots:
-  the agents read the test results.
+- Masking covers logs, not files. Don't let the app put secrets into error messages, reports, traces, screenshots
+  or page text: the agents read the test results. For Playwright, the `test-results` artifact also holds a page
+  snapshot, the page's text at the failure, in each `error-context.md`.
 
 **Limits.** The agents' own test runs don't get these values: the triage agent's flakiness re-run, the healer's
 three runs and the generator's runs start the app without them. If the app can't start without its secrets, the
@@ -552,6 +559,7 @@ passes it:
 | `run` | Test command. Must produce JUnit XML that matches `report_glob`. |
 | `env` | Optional object of environment variables for `run`. Playwright uses it to set `PLAYWRIGHT_JUNIT_OUTPUT_NAME`. |
 | `report_glob` | Location of the JUnit XML; the input to `parse-report.sh`. |
+| `error_context_glob` | Optional. The files the framework saves for each failed test that `triage` and `heal` should get, collected into the `test-results` artifact with the reports. Playwright: `test-results/**/error-context.md`, with each attempt's errors, page snapshot and test source. |
 | `test_glob` | Which files are tests. |
 | `default_test_dir` | Where tests live when the caller doesn't set `test_dir`. |
 | `locator_priority` | Preferred locator strategies, best first. |
@@ -731,8 +739,9 @@ These are **not** detected by the script and must be checked by the reviewer (th
   - `evals/triage/run-eval.py`: `--check` must accept the cases and reject a workspace file that gives an answer
     away. Runs with a stub engine must report the expected scores, mark a run that reads the answer key as
     invalid, and say why an agent wrote no `triage.json`. Each run must get its own folder, and a case's runs
-    must not overlap. On a scratch clone, hide mode must delete all of `evals/` and the rest of the answer key
-    before the agent looks for it, and must keep a `.git` that holds uncommitted work;
+    must not overlap. Each case's `error-context.md` files must be built as Playwright writes them, in the folder
+    Playwright names, and only with `--snapshots`. On a scratch clone, hide mode must delete all of `evals/` and the
+    rest of the answer key before the agent looks for it, and must keep a `.git` that holds uncommitted work;
   - `check-triage.sh`: a triage file that classifies the failures must pass; nothing to triage, or a triage file
     that is missing, empty, broken or classifies none of the failures, must fail with its reason;
   - agent permissions (`tests/engine-permissions/`): the real `claude` and `opencode`, staged as in CI and driven

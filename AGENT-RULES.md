@@ -62,9 +62,9 @@ conflicts with them. If a task can only be done by breaking a rule, stop and rep
 
 - Paths are relative to the repository root.
 - **Stay inside the workspace**, the repository root you start in. Everything you need is inside it: the tests and
-  their git history, `results/` and `.agentic-qa/`. Never list or read its parent folders or other runs' folders,
-  with any tool or command (`ls ..`, an absolute path elsewhere). If a path is refused, carry on with what the
-  workspace has.
+  their git history, `results/`, Playwright's `test-results/` and `.agentic-qa/`. Never list or read its parent
+  folders or other runs' folders, with any tool or command (`ls ..`, an absolute path elsewhere). If a path is
+  refused, carry on with what the workspace has.
 - The test directory is given in your task prompt. If it isn't, use the framework's `default_test_dir`.
 - The app under test runs at `$APP_URL`.
 - **Bash is restricted** by the engine's permission settings: `settings/claude-settings.json` for Claude Code,
@@ -109,6 +109,7 @@ conflicts with them. If a task can only be done by breaking a rule, stop and rep
 | `spec.md` | `scripts/fetch-spec.sh` | planner |
 | `results/plan.md` | planner | generator, pr-writer |
 | `results/failures.json` | `scripts/parse-report.sh` | triage, healer, pr-writer, defect-reporter, `scripts/report-defects.sh` |
+| `test-results/<folder>/error-context.md` | Playwright, for each failed attempt (restored from the test run) | triage |
 | `results/triage.json` | triage | healer, pr-writer, defect-reporter, `scripts/report-defects.sh`, `scripts/write-summary.sh` |
 | `results/defect-candidates.json` | `scripts/report-defects.sh prepare` | defect-reporter, `scripts/report-defects.sh publish` |
 | `results/defects/<slug>.md` | defect-reporter | `scripts/report-defects.sh publish` (GitHub issues) |
