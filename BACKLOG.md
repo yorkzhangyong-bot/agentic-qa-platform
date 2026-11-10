@@ -19,6 +19,8 @@
 - [ ] Real consumer failures with labels other than ENV
 - [x] Script + manual workflow: accuracy, per-category accuracy, confusion table, critical count REAL_BUG→SELECTOR_DRIFT
 - [x] Record model, engine version, prompt SHA per result
+- [ ] Grouped eval cases: show several failures from the same run together, as triage sees them in CI, so cross-test clues (like "no attacker key") are available.
+- [ ] After each eval run, append its row to the Results history table (by hand for now; automate later).
 
 ### Benchmark repo (separate consumer repo)
 - [ ] Small app + spec with FR/SC ids

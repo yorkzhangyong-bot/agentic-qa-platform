@@ -202,10 +202,31 @@ invalid run. It also records what's needed to compare scores over time:
 - `deleted_before_agents`: what `--hide-answers` deleted.
 
 The workflow uploads the result file as the artifact `triage-eval-results`, and each run's `agent.log` and
-`result.json` as `triage-eval-logs`. To keep the history, commit the result file to `evals/triage/results/`.
+`result.json` as `triage-eval-logs`. To keep the history, commit the result file to `evals/triage/results/`, and
+add the run's row to [Results history](#results-history).
 
 ### In CI
 
 `ci.yml` only checks the eval: it compiles `run-eval.py` and runs `--check`. `tests/run-tests.sh` also runs it end to
 end with a stub engine. That checks the scoring and the invalid-run check. It also checks hide mode on a scratch
 clone of the repository, never on the checkout itself. Neither calls a model API.
+
+### Results history
+
+One row per eval run, oldest first. The numbers are the ones described in [Output](#output). Consistency needs more
+than one run per case.
+
+| Date | Platform commit | `triage.md` commit | What changed | Engine and model | Cases × repeats | Accuracy | Critical count | Invalid runs | Consistency | Actions run |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-11-10 | `7733701` | `36a02d1` | first 20-case set after permission and isolation fixes | opencode 1.19.5, `deepseek/deepseek-flash` | 20 × 1 | 20/20 (100%) | 0 | 0 | — | [42804483276](https://github.com/yorkzhangyong-bot/agentic-qa-platform/actions/runs/42804483276) |
+| 2026-11-10 | `22990d6` | `36a02d1` | 31 cases: added real Kestrel and tricky cases | opencode 1.19.5, `deepseek/deepseek-flash` | 31 × 3 | 84/90 (93%) | 0 | 3 | 27/31 | [42813980294](https://github.com/yorkzhangyong-bot/agentic-qa-platform/actions/runs/42813980294) |
+| 2026-11-10 | `6d66802` | `6d66802` | agents continue after denied paths; FLAKY and ENV triage rules | opencode 1.19.5, `deepseek/deepseek-flash` | 31 × 3 | 90/93 (97%) | 0 | 0 | 31/31 | [42830002351](https://github.com/yorkzhangyong-bot/agentic-qa-platform/actions/runs/42830002351) |
+
+The first row used a smaller, easier case set, the 20 seed cases, so it isn't directly comparable with the rows
+after it.
+
+### Known hard cases
+
+- **T23** (a button disabled because the attacker key is missing; expected `ENV`): labelled `REAL_BUG`, because its
+  error text alone gives no sign of the missing key. In run 42830002351 it was the only miss, in all 3 repeats. This
+  is an expected miss: don't tune the prompt to this one case.
