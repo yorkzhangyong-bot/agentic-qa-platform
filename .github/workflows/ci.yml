@@ -51,6 +51,8 @@ jobs:
               || { echo "::error file=$f::missing one of the required keys $required"; exit 1; }
             name="$(jq -r .name "$f")"
             [ "$name" = "$(basename "$f" .json)" ] || { echo "::error file=$f::name '$name' must match the file name"; exit 1; }
+            jq -e '(.error_context_glob // "") | type == "string"' "$f" > /dev/null \
+              || { echo "::error file=$f::error_context_glob, if set, must be a glob string"; exit 1; }
             agents="$(jq -r .agents_dir "$f")"
             for role in planner generator healer; do
               [ -f "$agents/$role.md" ] || { echo "::error file=$f::$agents/$role.md is missing"; exit 1; }

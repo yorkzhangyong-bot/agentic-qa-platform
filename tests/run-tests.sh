@@ -35,7 +35,11 @@
 #                    log quotes the answer key is invalid; opencode's database is created before the parallel runs;
 #                    and a missing triage.json is explained (startup error, turn limit, timeout, rejected permission,
 #                    wrong place, last message); a multi-line error (a reporter's own text) reaches the JUnit report
-#                    unchanged. Hide mode (CI set) runs on a scratch clone: it must delete all of
+#                    unchanged. Each attempt's error-context.md is built as Playwright 1.65 writes it, in the folder
+#                    Playwright names (checked against a real Kestrel run): the case's page snapshot leaves the
+#                    report for the file, an attempt without an "Error Context:" line gets one, and a malformed
+#                    snapshot or path is refused. --no-snapshots writes no such file, with the same report, and its
+#                    result file says so. Hide mode (CI set) runs on a scratch clone: it must delete all of
 #                    evals/ and the rest of the answer key, .git included, before the stub agent looks for it, report
 #                    that agent's run as invalid and unscored, and refuse to delete a .git with uncommitted work. No
 #                    model API is called.
@@ -831,7 +835,8 @@ check_texts eval-run-with-stub-engine "$work/eval-transcript" \
   "-| drift |" "-### Invalid runs" "+\"engine_version\": \"9.9.9 (Claude Code)\"" "+\"model\": \"default\"" \
   "+\"blob\": \"$(git -C "$root" hash-object agents/common/triage.md)\"" "+\"deleted_before_agents\": []" \
   "+Triage every failure in results/failures.json" "+App URL: not provided." "+--max-turns" "+stream-json" \
-  "+--no-session-persistence" "+drift run 1: expected SELECTOR_DRIFT, got SELECTOR_DRIFT"
+  "+--no-session-persistence" "+drift run 1: expected SELECTOR_DRIFT, got SELECTOR_DRIFT" "+\"snapshots\": true" \
+  "+error-context.md on"
 # The answer must never reach the agent: no workspace may contain a case's "why".
 kept="$(find "$work/eval-run/trials" -mindepth 2 -maxdepth 2 -type d -name workspace | wc -l)"
 if [ "$kept" -eq 6 ] && ! grep -rqF "never-shown-to-the-agent" "$work"/eval-run/trials/*/workspace; then
@@ -963,14 +968,21 @@ spec.loader.exec_module(run_eval)
 case = {"file": "tests/e2e-browser/x.spec.ts", "name": "x"}
 at = f"        at {run_eval.CI_CHECKOUT}/tests/e2e-browser/x.spec.ts:7:3"
 problems = []
-_, multi = run_eval.junit(dict(case, error="Test timeout of 60000ms exceeded.\n\nError: locator.click: Test timeout of "
-                                           "60000ms exceeded.\nCall log:\n  - waiting for getByRole('button')"), 3, 1, 7, 3)
+
+
+def report(error):
+    test = dict(case, error=error)
+    return run_eval.junit(test, 3, 1, run_eval.reporter_error(test, 7, 3))[1]
+
+
+multi = report("Test timeout of 60000ms exceeded.\n\nError: locator.click: Test timeout of 60000ms exceeded.\n"
+               "Call log:\n  - waiting for getByRole('button')")
 lines = multi.splitlines()
 if "    Test timeout of 60000ms exceeded." not in lines or "      - waiting for getByRole('button')" not in lines:
     problems.append("the multi-line error was changed:\n" + multi)
 if "Error: Test timeout" in multi or at in lines:
     problems.append("the eval added its own 'Error: ' or 'at' line to the reporter's text:\n" + multi)
-_, one = run_eval.junit(dict(case, error="locator.click: Timeout 10000ms exceeded."), 3, 1, 7, 3)
+one = report("locator.click: Timeout 10000ms exceeded.")
 if "    Error: locator.click: Timeout 10000ms exceeded." not in one.splitlines() or at not in one.splitlines():
     problems.append("the one-line error wasn't completed:\n" + one)
 print("\n".join(problems) or "the reporter's text is kept")
@@ -979,6 +991,118 @@ PY
 code=$?
 set -e
 if [ "$code" -eq 0 ]; then ok "eval-keeps-the-reporter-text"; else bad "eval-keeps-the-reporter-text" "$(cat "$work/eval-junit.log")"; fi
+# Each attempt's error-context.md, as Playwright 1.65 writes it: in the folder Playwright names (checked against a
+# real Kestrel run), with the page snapshot that the case's error gives after its "Error Context:" line. The snapshot
+# leaves the report, an attempt without the line gets it, and a malformed snapshot or path is refused.
+set +e
+python3 - "$root/evals/triage/run-eval.py" > "$work/eval-context.log" 2>&1 <<'PY'
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("run_eval", sys.argv[1])
+ev = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ev)
+problems = []
+real = "adaptive-attack-1-offers-a-405a0--caps-FR-001-FR-014-FR-016--chromium"
+got = ev.output_folder("tests/e2e-browser/adaptive-attack.spec.ts",
+                       "1. offers an Adaptive mode that shows the attacker and caps [FR-001, FR-014, FR-016]",
+                       test_dir="tests/e2e-browser")
+if got != real:
+    problems.append(f"output folder {got!r}; Playwright named it {real!r}")
+case = {"id": "x", "file": "tests/e2e-browser/x.spec.ts", "name": "x"}
+sources = {case["file"]: "import { test, expect } from '@playwright/test';\n\ntest('x', async ({ page }) => {\n"
+                         "  await page.goto('/');\n  // the heading\n"
+                         "  await expect(page.getByRole('heading')).toHaveText('Hello');\n});\n"}
+attempt = ("Error: expect(locator).toHaveText(expected) failed\n\nExpected: \"Hello\"\nReceived: \"Bye\"\n\n"
+           "  5 |   // the heading\n> 6 |   await expect(page.getByRole('heading')).toHaveText('Hello');\n"
+           "    |                                           ^\n"
+           f"    at {ev.CI_CHECKOUT}/tests/e2e-browser/x.spec.ts:6:43")
+error = (attempt + "\n\nError Context: test-results/x-x-chromium/error-context.md\n\n# Page snapshot\n\n```yaml\n"
+         "- heading \"Bye\" [level=1]\n```\n\nRetry #1 " + "\N{BOX DRAWINGS LIGHT HORIZONTAL}" * 20 + "\n\n" + attempt)
+text, files = ev.error_context(dict(case, error=error), error, sources, 3, 1)
+first, retry = "test-results/x-x-chromium/error-context.md", "test-results/x-x-chromium-retry1/error-context.md"
+if "# Page snapshot" in text or "- heading" in text:
+    problems.append("the page snapshot is still in the report:\n" + text)
+if f"Error Context: {first}" not in text.splitlines() or text.splitlines()[-1] != f"Error Context: {retry}":
+    problems.append("each attempt must end with its Error Context line:\n" + text)
+if sorted(files) != [retry, first]:
+    problems.append(f"files {sorted(files)}, want {first} and {retry}")
+else:
+    for path, wanted, unwanted in (
+            (first, ["# Instructions\n\n- Following Playwright test failed.", "- Name: e2e-browser/x.spec.ts >> x",
+                     "- Location: tests/e2e-browser/x.spec.ts:3:1",
+                     "# Error details\n\n```\nError: expect(locator).toHaveText(expected) failed\n\nExpected: \"Hello\""
+                     "\nReceived: \"Bye\"\n```",
+                     "# Page snapshot\n\n```yaml\n- heading \"Bye\" [level=1]\n```", "# Test source\n\n```ts\n",
+                     "> 6 |   await expect(", "^ Error: expect(locator).toHaveText(expected) failed"],
+             ["at /home"]),
+            (retry, ["# Error details", "# Test source"], ["# Page snapshot"])):
+        problems += [f"{path} lacks {want!r}" for want in wanted if want not in files[path]]
+        problems += [f"{path} has {not_wanted!r}" for not_wanted in unwanted if not_wanted in files[path]]
+one = dict(case, error="locator.click: Timeout 10000ms exceeded.")
+text, files = ev.error_context(one, ev.reporter_error(one, 6, 3), sources, 3, 1)
+if (text.splitlines()[-1] != "Error Context: ../test-results/e2e-browser-x-x-chromium/error-context.md"
+        or list(files) != ["test-results/e2e-browser-x-x-chromium/error-context.md"]):
+    problems.append(f"the one-line error must get its Error Context line and file:\n{text}\n{list(files)}")
+for bad in (attempt + "\n\n# Page snapshot\n\n- heading", attempt + "\n\nError Context: elsewhere/error-context.md"):
+    try:
+        ev.error_context(dict(case, error=bad), bad, sources, 3, 1)
+        problems.append("accepted a malformed case:\n" + bad)
+    except ev.EvalError:
+        pass
+print("\n".join(problems) or "error-context.md as Playwright writes it")
+sys.exit(1 if problems else 0)
+PY
+code=$?
+set -e
+if [ "$code" -eq 0 ]; then ok "eval-error-context"; else bad "eval-error-context" "$(cat "$work/eval-context.log")"; fi
+# --snapshots (the default) gives each workspace its failure's error-context.md, at the path the report names;
+# --no-snapshots gives it none, with the same report. The result file and the report say which.
+snap_ok=1
+for mode in snapshots no-snapshots; do
+  (cd "$root" && env -u CI SKIP_MCP_WARMUP=1 python3 evals/triage/run-eval.py --dry-run --keep "--$mode" \
+    --cases "$work/eval-cases.jsonl" --work-dir "$work/eval-dry-$mode" > "$work/eval-dry-$mode.log" 2>&1) || snap_ok=0
+done
+(cd "$root" && env -u CI PATH="$eval_bin:$PATH" EVAL_STUB_ARGS="$work/eval-off-args.txt" SKIP_MCP_WARMUP=1 \
+  GITHUB_STEP_SUMMARY="$work/eval-off-summary.md" python3 evals/triage/run-eval.py --engine claude --no-snapshots \
+  --cases "$work/eval-cases.jsonl" --only env --out "$work/eval-off-results" --work-dir "$work/eval-off-run" \
+  > "$work/eval-off.log" 2>&1) || snap_ok=0
+set +e
+python3 - "$work" > "$work/eval-snapshots.log" 2>&1 <<'PY'
+import json
+import sys
+from pathlib import Path
+
+work = Path(sys.argv[1])
+problems = []
+for case in ("drift", "bug", "env"):
+    on, off = (work / f"eval-dry-{mode}" / "trials" / f"{case}-r1" / "workspace" for mode in ("snapshots", "no-snapshots"))
+    files = sorted(path.relative_to(on).as_posix() for path in on.glob("test-results/*/error-context.md"))
+    report = (on / "results" / "junit.xml").read_text(encoding="utf-8")
+    if len(files) != 1 or f"Error Context: ../{files[0]}" not in report:
+        problems.append(f"{case}: with snapshots its error-context.md files are {files}; the report names "
+                        f"{[line.strip() for line in report.splitlines() if 'Error Context' in line]}")
+    if (off / "test-results").exists():
+        problems.append(f"{case}: --no-snapshots wrote test-results/")
+    if (off / "results" / "junit.xml").read_text(encoding="utf-8") != report:
+        problems.append(f"{case}: the report differs between the two modes")
+results = sorted((work / "eval-off-results").glob("*.json"))
+if len(results) != 1 or not results[0].name.endswith("-no-snapshots.json"):
+    problems.append(f"--no-snapshots result files: {[path.name for path in results]}")
+elif json.loads(results[0].read_text(encoding="utf-8"))["meta"].get("snapshots") is not False:
+    problems.append("the result file doesn't record snapshots: false")
+if "error-context.md off" not in (work / "eval-off-summary.md").read_text(encoding="utf-8"):
+    problems.append("the report doesn't say error-context.md was off")
+print("\n".join(problems))
+sys.exit(1 if problems else 0)
+PY
+code=$?
+set -e
+if [ "$code" -eq 0 ] && [ "$snap_ok" -eq 1 ]; then
+  ok "eval-snapshots-switch"
+else
+  bad "eval-snapshots-switch" "$(cat "$work/eval-snapshots.log" "$work"/eval-dry-*.log "$work/eval-off.log" 2> /dev/null | tail -n 30)"
+fi
 
 # Hide mode, the default when CI is set, on a scratch clone of this repository whose answer key is the stub cases,
 # plus an old result file and a note that quotes a case's "why". All of evals/ must be gone before the first agent

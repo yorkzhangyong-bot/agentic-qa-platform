@@ -4,6 +4,7 @@
   "run": "npx playwright test --reporter=junit",
   "env": { "PLAYWRIGHT_JUNIT_OUTPUT_NAME": "results/junit.xml" },
   "report_glob": "results/*.xml",
+  "error_context_glob": "test-results/**/error-context.md",
   "test_glob": "tests/**/*.spec.ts",
   "default_test_dir": "tests",
   "locator_priority": ["getByTestId", "getByRole", "getByLabel", "getByText"],

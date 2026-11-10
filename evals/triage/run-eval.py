@@ -8,6 +8,10 @@ workspace built the way the triage job of .github/workflows/test-and-heal.yml se
     .agentic-qa/                  this platform: AGENT-RULES.md, agents, frameworks, scripts, settings
     results/junit.xml             a Playwright JUnit report holding the case's one failure
     results/failures.json         written from it by scripts/parse-report.sh, as in CI
+    test-results/<folder>/error-context.md
+                                  what Playwright saved for each attempt, as the triage job restores it from the
+                                  test-results artifact: the errors, the page snapshot if the case has one, the
+                                  test source (not with --no-snapshots)
     node_modules/.bin/playwright  replays the recorded result if the agent re-runs the test (there is no app)
     .claude/, .mcp.json or …      staged by scripts/stage-agents.sh, as in CI
 
@@ -32,6 +36,7 @@ The answer key is kept away from the agent:
 
 Usage:
   python3 evals/triage/run-eval.py [--engine claude|opencode] [--model M] [--repeats N] [--jobs N] [--only IDS]
+                                   [--no-snapshots]
   python3 evals/triage/run-eval.py --check      validate the cases and the CI prompt; no agent, no API calls
   python3 evals/triage/run-eval.py --dry-run    also build every workspace, without running the agent
 
@@ -93,6 +98,22 @@ POINTERS = (("cases.jsonl", r"cases\.jsonl"), ("evals/", r"evals[/\\]"))  # wher
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 BASH = os.environ.get("EVAL_BASH") or shutil.which("bash") or "bash"
 print_lock = threading.Lock()
+
+# What Playwright 1.65 saves for each attempt of a failed test (packages/playwright/src/errorContext.ts and the
+# outputDir in worker/testInfo.ts): <outputDir>/<test folder>/error-context.md, named by the report on an
+# "Error Context: <path>" line, relative to the config's testDir.
+OUTPUT_DIR = "test-results"   # the sample project's outputDir, Playwright's default, next to playwright.config.ts
+PROJECT_NAME = "chromium"     # its one Playwright project
+PLAYWRIGHT_INSTRUCTIONS = ("# Instructions\n\n- Following Playwright test failed.\n"
+                           "- Explain why, be concise, respect Playwright best practices.\n"
+                           "- Provide a snippet of code with the fix, if possible.\n")
+RETRY_HEADER = re.compile(r"^\s*Retry #(\d+) " + "\N{BOX DRAWINGS LIGHT HORIZONTAL}")  # "Retry #1 ───…"
+CONTEXT_LINE = re.compile(r"^\s*Error Context: (\S+)\s*$")
+CONTEXT_PATH = re.compile(rf"(?:\.\./)*({OUTPUT_DIR}/([^/\s]+)/error-context\.md)")
+FRAME_LINE = re.compile(r"^\s*(?:> )?\s*\d+ \||^\s*\| *\^")      # a code frame's lines and its caret line
+AT_LINE = re.compile(r"^\s+at \S")                                # a stack line, or "at file:line" above a frame
+STACK_FRAME = re.compile(r"^\s+at (?:.*? \()?(/[^()\s]+?):(\d+):(\d+)\)?\s*$")
+ERROR_START = re.compile(r"^(?:Test timeout of \d+ms exceeded|\w*Error\b)")
 
 
 class EvalError(Exception):
@@ -332,6 +353,24 @@ def workspace_leaks(cases):
     return errors
 
 
+def generated_leaks(cases, all_cases, project):
+    """Errors for what a case's workspace gets besides the project and the platform: its report's failure text and its
+    error-context.md files. They must give no answer away either, and a case they can't be built from is an error."""
+    errors = []
+    for case in cases:
+        try:
+            decl, decl_col, error, contexts = failure_inputs(case, project)
+        except EvalError as exc:
+            errors.append(str(exc))
+            continue
+        for where, text in (("its report", junit(case, decl, decl_col, error)[1]), *contexts.items()):
+            errors += [f"{case['id']}: {where} gives away {case_id}'s answer ({how})"
+                       for case_id, how in giveaways(text, all_cases)]
+            errors += [f"{case['id']}: {where} mentions {name}, so every run that reads it would be invalid"
+                       for name, pattern in POINTERS if re.search(pattern, text)]
+    return errors
+
+
 def load_project():
     """The sample project's files and modes, read once: --hide-answers deletes evals/, the project included, before
     the workspaces are built from it."""
@@ -440,19 +479,175 @@ def failing_line(lines, decl, error):
     return next((n for n in reversed(body) if "await" in lines[n]), max(decl - 1, 0))
 
 
-def junit(case, decl, decl_col, at_line, at_col):
-    """A Playwright JUnit report with the one failure, and the failure text (as the line reporter prints it). A
-    one-line error is completed as Playwright would print it: "<ErrorClass>: …" and the failing line. A multi-line
-    error is the reporter's own text (with its call log, code frame and retries) and is used as it is."""
-    rel = case["file"][len(TEST_DIR) + 1:]
+def reporter_error(case, at_line, at_col):
+    """The case's error as the reporter prints it under the test's header. A one-line error is completed as Playwright
+    prints it: "<ErrorClass>: …" and the failing line. A multi-line error is the reporter's own text, with its call
+    log, code frame and retries."""
     error = case["error"].strip()
-    header = f"[chromium] {SEP} {rel}:{decl}:{decl_col} {SEP} {case['name']}"
     if "\n" in error:
-        body = [f"    {line}" if line.strip() else "" for line in error.splitlines()]
-    else:
-        if not re.match(r"\w*(?:Error|Exception)\b", error):
-            error = f"Error: {error}"  # Playwright prints a thrown error as "<ErrorClass>: <message>"
-        body = [f"    {error}", "", f"        at {CI_CHECKOUT}/{case['file']}:{at_line}:{at_col}"]
+        return error
+    if not re.match(r"\w*(?:Error|Exception)\b", error):
+        error = f"Error: {error}"  # Playwright prints a thrown error as "<ErrorClass>: <message>"
+    return f"{error}\n\n    at {CI_CHECKOUT}/{case['file']}:{at_line}:{at_col}"
+
+
+def sanitize_for_file_path(text):
+    """Playwright's sanitizeForFilePath."""
+    return re.sub(r"[\x00-\x2C\x2E-\x2F\x3A-\x40\x5B-\x60\x7B-\x7F]+", "-", text)
+
+
+def trim_long_string(text, length=60):
+    """Playwright's trimLongString, at its windowsFilesystemFriendlyLength of 60."""
+    if len(text) <= length:
+        return text
+    middle = f"-{hashlib.sha1(text.encode('utf-8')).hexdigest()[:5]}-"
+    start = (length - len(middle)) // 2
+    return text[:start] + middle + text[len(text) - (length - len(middle) - start):]
+
+
+def output_folder(file, name, test_dir=TEST_DIR, project=PROJECT_NAME):
+    """The folder Playwright gives a test's first attempt in its outputDir (testInfo.outputDir); a retry adds
+    "-retry<n>"."""
+    relative = file[len(test_dir) + 1:] if file.startswith(f"{test_dir}/") else file
+    stem = re.sub(r"\.(spec|test)\.(js|ts|jsx|tsx|mjs|mts|cjs|cts)$", "", relative).replace("/", "-")
+    title = " ".join(name.split(f" {SEP} "))
+    return trim_long_string(f"{stem}-{sanitize_for_file_path(title)}") + "-" + sanitize_for_file_path(project)
+
+
+def code_frame(source, line, column, message):
+    """Playwright's "# Test source": up to 100 lines either side of the failing one, which is marked with ">" and
+    followed by a caret under its column and the first line of the error."""
+    lines = source.split("\n")
+    start, end = max(0, line - 101), min(len(lines), line + 100)
+    width = len(str(end))
+    frame = [f"{'> ' if n == line else '  '}{str(n).ljust(width)} | {text}"
+             for n, text in enumerate(lines[start:end], start + 1)]
+    if message:
+        frame.insert(line - start, f"{' ' * (width + 2)} | {' ' * max(0, column - 2)} ^ {message}")
+    return "\n".join(frame)
+
+
+def take_snapshot(lines, where):
+    """An attempt's lines without its "# Page snapshot" block, and the snapshot (None if it has none)."""
+    starts = [n for n, line in enumerate(lines) if line.strip() == "# Page snapshot"]
+    if not starts:
+        return lines, None
+    n = starts[0]
+    close = next((m for m in range(n + 3, len(lines)) if lines[m].strip() == "```"), None)
+    if len(starts) > 1 or close is None or lines[n + 1].strip() or lines[n + 2].strip() != "```yaml":
+        raise EvalError(f"{where}: give an attempt at most one page snapshot: a '# Page snapshot' line, a blank line, "
+                        "then a ```yaml block")
+    first = n
+    while first > 0 and not lines[first - 1].strip():
+        first -= 1
+    return lines[:first] + lines[close + 1:], "\n".join(lines[n + 3:close])
+
+
+def split_errors(lines):
+    """An attempt's error messages. Each starts at a line like "Error: …", "TypeError: …" or "Test timeout of …"."""
+    errors = [[]]
+    for line in lines:
+        if ERROR_START.match(line) and any(part.strip() for part in errors[-1]) and not errors[-1][-1].strip():
+            errors.append([])
+        errors[-1].append(line)
+    messages = []
+    for error in errors:
+        filled = [n for n, line in enumerate(error) if line.strip()]
+        if filled:
+            messages.append("\n".join(error[filled[0]:filled[-1] + 1]))
+    return messages
+
+
+def error_context(case, text, sources, decl, decl_col):
+    """Playwright's error context for the case's failure: (the reporter's text, {path in the workspace: the content of
+    an error-context.md}), one file per attempt, as Playwright 1.65 writes them.
+
+    A "# Page snapshot" block in a case's error isn't part of the reporter's text: it is taken out, and becomes that
+    attempt's page snapshot. Every attempt ends with its "Error Context: <path>" line, which Playwright prints for each
+    failed attempt; one without it gets it, in the folder Playwright would use. The file holds what Playwright writes:
+    its instructions, the test's name and location, the attempt's errors, its page snapshot if the case gives one, and
+    the test source around the failing line. Nothing else: no label, no "why"."""
+    where = case["id"]
+    chunks = [[]]
+    for line in text.split("\n"):
+        if RETRY_HEADER.match(line):
+            chunks.append([])
+        chunks[-1].append(line)
+    named = [m.group(1) for chunk in chunks for m in map(CONTEXT_LINE.match, chunk) if m]
+    for path in named:
+        if not CONTEXT_PATH.fullmatch(path):
+            raise EvalError(f"{where}: 'Error Context: {path}' must name {OUTPUT_DIR}/<folder>/error-context.md")
+    if named:  # the other attempts get the same prefix and folder, as Playwright names them
+        found = CONTEXT_PATH.fullmatch(named[0])
+        prefix, base = named[0][:found.start(1)], re.sub(r"-retry\d+$", "", found.group(2))
+    else:  # printed relative to the config's testDir
+        prefix, base = "../" * len(TEST_DIR.split("/")), output_folder(case["file"], case["name"])
+    relative = case["file"][len(TEST_DIR) + 1:]
+    report, files = [], {}
+    for n, chunk in enumerate(chunks):
+        retry = int(RETRY_HEADER.match(chunk[0]).group(1)) if n else 0
+        end = len(chunk)
+        while end and not chunk[end - 1].strip():
+            end -= 1
+        body, snapshot = take_snapshot(chunk[:end], where)
+        paths = [m.group(1) for m in map(CONTEXT_LINE.match, body) if m]
+        if len(paths) > 1:
+            raise EvalError(f"{where}: an attempt names more than one Error Context file")
+        if not paths:
+            paths = [f"{prefix}{OUTPUT_DIR}/{base}{f'-retry{retry}' if retry else ''}/error-context.md"]
+            body = body + ["", f"Error Context: {paths[0]}"]
+        target = CONTEXT_PATH.fullmatch(paths[0]).group(1)
+        if target in files:
+            raise EvalError(f"{where}: two attempts name {target}")
+        errors = split_errors([line for line in body if not (RETRY_HEADER.match(line) or CONTEXT_LINE.match(line)
+                                                             or FRAME_LINE.match(line) or AT_LINE.match(line))])
+        if not errors:
+            raise EvalError(f"{where}: attempt {retry + 1} has no error message")
+        frame = None
+        top = next((m for m in map(STACK_FRAME.match, body) if m), None)  # the frame Playwright shows the source of
+        if top and top.group(1).startswith(f"{CI_CHECKOUT}/") and top.group(1)[len(CI_CHECKOUT) + 1:] in sources:
+            frame = code_frame(sources[top.group(1)[len(CI_CHECKOUT) + 1:]], int(top.group(2)), int(top.group(3)),
+                               errors[-1].split("\n")[0])
+        lines = [PLAYWRIGHT_INSTRUCTIONS, "# Test info", "",
+                 f"- Name: {' >> '.join([relative, *case['name'].split(f' {SEP} ')])}",
+                 f"- Location: {case['file']}:{decl}:{decl_col}", "", "# Error details"]
+        for error in errors:
+            lines += ["", "```", error, "```"]
+        if snapshot:
+            lines += ["", "# Page snapshot", "", "```yaml", snapshot, "```"]
+        if frame:
+            lines += ["", "# Test source", "", "```ts", frame, "```"]
+        files[target] = "\n".join(lines)
+        report += body + chunk[end:]
+    return "\n".join(report), files
+
+
+def stub_test(case):
+    """The test a workspace gets when the sample project has no file for the case."""
+    title = case["name"].split(f" {SEP} ")[-1].replace("\\", "\\\\").replace("'", "\\'")
+    return ("import { test } from '@playwright/test';\n\n"
+            f"test('{title}', async ({{ page }}) => {{\n  await page.goto('/');\n}});\n")
+
+
+def failure_inputs(case, project):
+    """What the triage job gets for the case's failure: the test's line and column, the error as the report shows it,
+    and the error-context.md files Playwright saved, by their path in the workspace (see error_context)."""
+    sources = {name: data.decode("utf-8", "replace") for name, (data, _) in project.items()}
+    sources.setdefault(case["file"], stub_test(case))
+    source_lines = sources[case["file"]].splitlines()
+    decl, decl_col = find_test("\n".join(source_lines), case["name"]) or (1, 1)
+    at = failing_line(source_lines, decl, case["error"])
+    at_col = indent_of(source_lines[at]) + 1 if at < len(source_lines) else 1
+    text, files = error_context(case, reporter_error(case, at + 1, at_col), sources, decl, decl_col)
+    return decl, decl_col, text, files
+
+
+def junit(case, decl, decl_col, error):
+    """A Playwright JUnit report with the one failure, and the failure's text as the reporter prints it: the test's
+    header, then its error (see failure_inputs)."""
+    rel = case["file"][len(TEST_DIR) + 1:]
+    header = f"[chromium] {SEP} {rel}:{decl}:{decl_col} {SEP} {case['name']}"
+    body = [f"    {line}" if line.strip() else "" for line in error.splitlines()]
     text = "\n".join([f"  {header}", "", *body])
     suites = ET.Element("testsuites", {"id": "", "name": "", "tests": "1", "failures": "1", "skipped": "0",
                                        "errors": "0", "time": "14.2"})
@@ -484,8 +679,10 @@ def rerun_shim(case, failure_text):
             f"cat <<'{marker}'\n{output}{marker}\nexit {code}\n")
 
 
-def build_workspace(case, ws, project, engine, model, log):
-    """The workspace of a failed CI run with this one failure; returns its entry in results/failures.json."""
+def build_workspace(case, ws, project, engine, model, log, snapshots=True):
+    """The workspace of a failed CI run with this one failure; returns its entry in results/failures.json. With
+    snapshots, it also gets the error-context.md files Playwright saved for the failure, as the triage job restores
+    them from the test-results artifact."""
     ws.mkdir(parents=True)
     for name, (data, mode) in project.items():
         target = ws / name
@@ -494,9 +691,7 @@ def build_workspace(case, ws, project, engine, model, log):
         target.chmod(mode)
     test_file = ws / case["file"]
     if not test_file.is_file():
-        title = case["name"].split(f" {SEP} ")[-1].replace("\\", "\\\\").replace("'", "\\'")
-        write(test_file, "import { test } from '@playwright/test';\n\n"
-                         f"test('{title}', async ({{ page }}) => {{\n  await page.goto('/');\n}});\n")
+        write(test_file, stub_test(case))
     git(ws, "init", "-q", log=log)
     git(ws, "config", "core.autocrlf", "false", log=log)
     git(ws, "add", "-A", log=log)
@@ -509,12 +704,12 @@ def build_workspace(case, ws, project, engine, model, log):
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
-    source_lines = test_file.read_text(encoding="utf-8").splitlines()
-    decl, decl_col = find_test("\n".join(source_lines), case["name"]) or (1, 1)
-    at = failing_line(source_lines, decl, case["error"])
-    at_col = indent_of(source_lines[at]) + 1 if at < len(source_lines) else 1
-    report, failure_text = junit(case, decl, decl_col, at + 1, at_col)
+    decl, decl_col, error, contexts = failure_inputs(case, project)
+    report, failure_text = junit(case, decl, decl_col, error)
     write(ws / "results" / "junit.xml", report)
+    if snapshots:  # not committed: in CI they come from the test-results artifact, after the checkout
+        for path, content in contexts.items():
+            write(ws / path, content)
     shim = ws / "node_modules" / ".bin" / "playwright"
     write(shim, rerun_shim(case, failure_text))
     shim.chmod(0o755)
@@ -740,7 +935,7 @@ def run_trial(case, repeat, opts, step, work_dir, bin_dir, project, answer_key):
     login = None
     try:
         with open(run_dir / "agent.log", "w", encoding="utf-8", newline="\n") as log:
-            failure = build_workspace(case, ws, project, opts.engine, opts.model, log)
+            failure = build_workspace(case, ws, project, opts.engine, opts.model, log, opts.snapshots)
             if opts.dry_run:
                 trial["got"] = "dry-run"
             else:
@@ -839,7 +1034,8 @@ def report(meta, summary, trials):
     lines = [f"## Triage eval: {meta['engine']} {DOT} {meta['model']}", "",
              f"{meta['cases']['count']} cases {TIMES} {meta['repeats']} run(s) {DOT} engine `{meta['engine_version']}` "
              f"{DOT} triage.md `{meta['triage_md']['blob'][:7]}`{' (modified)' if meta['triage_md']['modified'] else ''} "
-             f"{DOT} platform `{meta['platform_commit'][:7]}` {DOT} {meta['date']}", ""]
+             f"{DOT} platform `{meta['platform_commit'][:7]}` {DOT} error-context.md "
+             f"{'on' if meta.get('snapshots', True) else 'off'} {DOT} {meta['date']}", ""]
     if meta["deleted_before_agents"]:
         lines += ["Answer key deleted from the checkout before the first agent started: "
                   + ", ".join(f"`{path}`" for path in meta["deleted_before_agents"]) + ".", ""]
@@ -918,8 +1114,8 @@ def warm_up_mcp():
         say(f"run-eval: warning: could not pre-download @playwright/mcp@{version}: {out.strip()[:200]}", sys.stderr)
 
 
-def results_path(out_dir, date, engine, model):
-    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", model).strip("-") or "default"
+def results_path(out_dir, date, engine, model, snapshots=True):
+    slug = (re.sub(r"[^A-Za-z0-9._-]+", "-", model).strip("-") or "default") + ("" if snapshots else "-no-snapshots")
     path, n = out_dir / f"{date}-{engine}-{slug}.json", 2
     while path.exists():
         path, n = out_dir / f"{date}-{engine}-{slug}-{n}.json", n + 1
@@ -945,6 +1141,9 @@ def main():
     parser.add_argument("--hide-answers", action=argparse.BooleanOptionalAction, default=None,
                         help="delete the answer key from this checkout, .git included, before the first agent "
                              "starts (default: on when CI is set)")
+    parser.add_argument("--snapshots", action=argparse.BooleanOptionalAction, default=True,
+                        help="give each failure the error-context.md files Playwright saves, with the page snapshot "
+                             "where the case has one, as the triage job gets them (default: on)")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true", help="validate cases and prompt only; no agent, no API calls")
     mode.add_argument("--dry-run", action="store_true", help="build the workspaces, but don't run the agent")
@@ -972,6 +1171,9 @@ def main():
             errors += [f"--only: no case {name!r}" for name in sorted(unknown)]
             cases = [case for case in cases if case["id"] in wanted]
         errors += workspace_leaks(all_cases)
+        project = load_project()  # now: --hide-answers deletes evals/, the project included, before the workspaces
+        if not errors:
+            errors += generated_leaks(all_cases, all_cases, project)
         for error in errors:
             say(f"run-eval: {error}", sys.stderr)
         if errors:
@@ -995,8 +1197,8 @@ def main():
                           "modified": bool(git_info("status", "--porcelain", "--", TRIAGE_AGENT))},
             "agent_rules_blob": git_info("hash-object", "AGENT-RULES.md"),
             "cases": {"file": relative(opts.cases), "count": len(cases), "sha256": hashlib.sha256(raw).hexdigest()},
+            "snapshots": opts.snapshots,
         }
-        project = load_project()
         version = "" if opts.dry_run else engine_version(opts.engine)
         work_dir = (opts.work_dir or Path(tempfile.mkdtemp(prefix="triage-eval-"))).resolve()
         (work_dir / "trials").mkdir(parents=True, exist_ok=True)
@@ -1053,7 +1255,8 @@ def main():
                   json.dumps(trial, indent=2, ensure_ascii=False) + "\n")
         if opts.dry_run:
             say(f"run-eval: dry run OK: {len(trials)} workspaces built, each with exactly its failure in "
-                "results/failures.json; the agent was not run.")
+                "results/failures.json" + (" and its error-context.md files" if opts.snapshots else "")
+                + "; the agent was not run.")
             return 0
     except EvalError as exc:
         say(f"run-eval: {exc}", sys.stderr)
@@ -1075,7 +1278,7 @@ def main():
         "deleted_before_agents": hidden,
     }
     summary = score(trials, opts.repeats)
-    out = results_path(opts.out, meta["date"], opts.engine, meta["model"])
+    out = results_path(opts.out, meta["date"], opts.engine, meta["model"], opts.snapshots)
     write(out, json.dumps({"meta": meta, "summary": summary, "trials": trials}, indent=2, ensure_ascii=False) + "\n")
     text = report(meta, summary, trials)
     say("")

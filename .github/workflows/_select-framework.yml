@@ -6,6 +6,7 @@ name: _select-framework
 #   install_script        install commands, one per line
 #   forbidden_paths_csv   forbidden paths joined with commas (the input format of anti-cheat.sh)
 #   runtime               "java" when the commands use Maven/Gradle, otherwise "node"
+#   error_context_glob    the optional key's value, or "" when the config has none
 #   engine                the validated engine (claude or opencode)
 
 on:
@@ -46,6 +47,9 @@ on:
       report_glob:
         description: Glob of the JUnit XML reports.
         value: ${{ jobs.select.outputs.report_glob }}
+      error_context_glob:
+        description: Glob of the files the framework saves for each failed test (Playwright's error-context.md), or empty.
+        value: ${{ jobs.select.outputs.error_context_glob }}
       test_glob:
         description: Glob of the test files.
         value: ${{ jobs.select.outputs.test_glob }}
@@ -92,6 +96,7 @@ jobs:
       run: ${{ steps.read.outputs.run }}
       env: ${{ steps.read.outputs.env }}
       report_glob: ${{ steps.read.outputs.report_glob }}
+      error_context_glob: ${{ steps.read.outputs.error_context_glob }}
       test_glob: ${{ steps.read.outputs.test_glob }}
       default_test_dir: ${{ steps.read.outputs.default_test_dir }}
       locator_priority: ${{ steps.read.outputs.locator_priority }}
@@ -154,6 +159,7 @@ jobs:
           done
           emit install_script "$(jq -r '.install | if type == "array" then join("\n") else . end' "$cfg")"
           emit forbidden_paths_csv "$(jq -r '.forbidden_paths | join(",")' "$cfg")"
+          emit error_context_glob "$(jq -r '.error_context_glob // ""' "$cfg")"
           if jq -e '[(.install | if type == "array" then .[] else . end), .run] | any(test("\\b(mvnw?|gradlew?)\\b"))' "$cfg" > /dev/null; then
             emit runtime java
           else
