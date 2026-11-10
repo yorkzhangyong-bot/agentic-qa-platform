@@ -5,10 +5,10 @@ name: eval-triage
 # accuracy, the per-category accuracy, a confusion table and the critical count (REAL_BUG classified as
 # SELECTOR_DRIFT). Manual only, because every case is a paid agent run. See evals/README.md.
 #
-# The agents run on the same machine as this checkout, so the answer key must not be on it: run-eval.py reads
-# cases.jsonl into memory, then deletes it, every other file that gives an answer away, and .git before the first
-# agent starts (--hide-answers). A run whose log mentions cases.jsonl, evals/ or this checkout, or quotes a case's
-# "why", is reported as invalid and not scored.
+# The agents run on the same machine as this checkout, so the answer key must not be on it: run-eval.py reads the
+# cases and the sample project into memory, then deletes all of evals/, every other file that gives an answer away,
+# and .git before the first agent starts (--hide-answers). A run whose log mentions cases.jsonl, evals/ or this
+# checkout, or quotes a case's "why", is reported as invalid and not scored.
 
 on:
   workflow_dispatch:
@@ -107,8 +107,9 @@ jobs:
         run: |
           model="$OPENCODE_MODEL"
           if [ "$ENGINE" = claude ]; then model="$CLAUDE_MODEL"; fi
-          # --hide-answers: load the cases into memory, then delete the answer key from this checkout (cases.jsonl,
-          # result files, every other file that gives an answer away, .git) before the first agent starts.
+          # --hide-answers: load the cases and the sample project into memory, then delete the answer key from this
+          # checkout (all of evals/, every other file that gives an answer away, .git) before the first agent starts.
+          # The result file is written to evals/triage/results/ after the last agent finished.
           python3 evals/triage/run-eval.py --hide-answers --engine "$ENGINE" ${model:+--model "$model"} \
             --repeats "$REPEATS" --jobs 4 --work-dir "$RUNNER_TEMP/triage-eval"
 

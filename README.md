@@ -686,9 +686,10 @@ These are **not** detected by the script and must be checked by the reviewer (th
     `publish` runs against a stub `gh` (new issues, a comment on an open issue, failed `gh` calls, missing and
     stray reports) and must always exit 0;
   - `evals/triage/run-eval.py`: `--check` must accept the cases and reject a workspace file that gives an answer
-    away. Runs with a stub engine must report the expected scores and mark a run that reads the answer key as
-    invalid. On a scratch clone, hide mode must delete the answer key before the agent looks for it, and must keep
-    a `.git` that holds uncommitted work.
+    away. Runs with a stub engine must report the expected scores, mark a run that reads the answer key as
+    invalid, and say why an agent wrote no `triage.json`. On a scratch clone, hide mode must delete all of
+    `evals/` and the rest of the answer key before the agent looks for it, and must keep a `.git` that holds
+    uncommitted work.
 - `.github/workflows/ci.yml` runs on every push and pull request:
   - `shellcheck` on the scripts;
   - `actionlint` on the workflows;

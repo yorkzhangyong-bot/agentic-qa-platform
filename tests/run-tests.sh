@@ -28,9 +28,12 @@
 #                    a bad label and a workspace file that gives an answer away. Runs with a stub engine (every
 #                    failure SELECTOR_DRIFT, 3 cases x 2 runs) must report the expected scores, the CI prompt, the
 #                    result-file metadata and the engine's full-transcript flags (claude and opencode); a run whose
-#                    log quotes the answer key is invalid. Hide mode (CI set) runs on a scratch clone: it must delete
-#                    the answer key, .git included, before the stub agent looks for it, report that agent's run as
-#                    invalid and unscored, and refuse to delete a .git with uncommitted work. No model API is called.
+#                    log quotes the answer key is invalid; opencode's database is created before the parallel runs;
+#                    and a missing triage.json is explained (startup error, turn limit, timeout, rejected permission,
+#                    wrong place, last message). Hide mode (CI set) runs on a scratch clone: it must delete all of
+#                    evals/ and the rest of the answer key, .git included, before the stub agent looks for it, report
+#                    that agent's run as invalid and unscored, and refuse to delete a .git with uncommitted work. No
+#                    model API is called.
 #
 # Usage: bash tests/run-tests.sh          (exit code 0 when every check passes)
 set -euo pipefail
@@ -645,10 +648,11 @@ set +e
 (cd "$root" && python3 evals/triage/run-eval.py --check > "$work/eval-check.log" 2>&1)
 code=$?
 set -e
-# The stub cases below reuse three real test names with their labels, so hide mode deletes this file too.
+# Hide mode deletes all of evals/; and this file too, as the stub cases below reuse three real test names with their
+# labels.
 check_texts eval-cases-are-valid "$work/eval-check.log" "+cases OK" "-warning" \
-  "+no file that goes into a workspace gives an answer away" "+  evals/triage/cases.jsonl  (the cases)" \
-  "+  tests/run-tests.sh  (T01: its test name near a label" "+  .git  ("
+  "+no file that goes into a workspace gives an answer away" "+  evals/  (the eval: its cases, result files" \
+  "+  tests/run-tests.sh  (T01: its test name near a label" "+  .git/  (" "-  evals/triage/"
 printf '%s\n' '{"id": "x", "file": "tests/x.spec.ts", "name": "n", "error": "e", "expected": "BUG", "why": "w"}' \
   > "$work/eval-bad.jsonl"
 set +e
@@ -687,9 +691,15 @@ cat > "$eval_bin/claude" <<'STUB'
 #!/usr/bin/env bash
 # Stub engine for the triage eval, as claude and as opencode: records its arguments and calls every failure
 # SELECTOR_DRIFT. In the workspace whose failure is the test $EVAL_STUB_PEEK_ON, it first runs cat $EVAL_STUB_PEEK,
-# as an agent hunting for the answer key would.
+# as an agent hunting for the answer key would. For the test $EVAL_STUB_CRASH_ON it fails at startup instead, as
+# opencode did when parallel first runs raced to create its database.
 if [ "${1:-}" = --version ]; then echo "9.9.9 (Claude Code)"; exit 0; fi
 printf '%s\n' "$@" >> "$EVAL_STUB_ARGS"
+if [ "${1:-}" = db ]; then echo "/stub/opencode.db"; exit 0; fi
+if [ -n "${EVAL_STUB_CRASH_ON:-}" ] && grep -qF "$EVAL_STUB_CRASH_ON" results/failures.json; then
+  printf '\033[91m\033[1mError: \033[0mUnexpected error\n\ndatabase is locked\n'
+  exit 1
+fi
 if [ -n "${EVAL_STUB_PEEK:-}" ] && grep -qF "$EVAL_STUB_PEEK_ON" results/failures.json; then
   cat "$EVAL_STUB_PEEK"
 fi
@@ -734,26 +744,88 @@ if [ "$kept" -eq 6 ] && ! grep -rqF "never-shown-to-the-agent" "$work/eval-run/w
 else
   bad "eval-workspaces-hide-the-answer" "$kept workspaces kept; the why text is in:"$'\n'"$(grep -rlF never-shown-to-the-agent "$work/eval-run/workspaces" | head -n 3)"
 fi
-# OpenCode's transcript, its JSON event stream, goes to the log too. Here the stub agent reads a copy of the answer
-# key under another name: its run is invalid because the log quotes a case's "why".
+# OpenCode's transcript, its JSON event stream, goes to the log too. Its database must be created once before the
+# parallel runs. In drift the stub agent reads a copy of the answer key under another name: that run is invalid
+# because the log quotes a case's "why". In bug the stub fails at startup: the report must say how.
 cp "$work/eval-cases.jsonl" "$work/key-copy.txt"
 set +e
 (cd "$root" && env -u CI PATH="$eval_bin:$PATH" EVAL_STUB_ARGS="$work/eval-oc-args.txt" \
-  EVAL_STUB_PEEK="$work/key-copy.txt" EVAL_STUB_PEEK_ON="logs in with valid credentials" SKIP_MCP_WARMUP=1 \
-  GITHUB_STEP_SUMMARY="$work/eval-oc-summary.md" python3 evals/triage/run-eval.py --engine opencode \
-  --cases "$work/eval-cases.jsonl" --only drift --jobs 1 --out "$work/eval-oc-results" --work-dir "$work/eval-oc-run" \
-  > "$work/eval-oc.log" 2>&1)
+  EVAL_STUB_PEEK="$work/key-copy.txt" EVAL_STUB_PEEK_ON="logs in with valid credentials" \
+  EVAL_STUB_CRASH_ON="shows correct total" SKIP_MCP_WARMUP=1 GITHUB_STEP_SUMMARY="$work/eval-oc-summary.md" \
+  python3 evals/triage/run-eval.py --engine opencode --cases "$work/eval-cases.jsonl" --only drift,bug --jobs 2 \
+  --out "$work/eval-oc-results" --work-dir "$work/eval-oc-run" > "$work/eval-oc.log" 2>&1)
 code=$?
 set -e
 { cat "$work/eval-oc-summary.md" "$work/eval-oc-args.txt" "$work/eval-oc.log"; } > "$work/eval-oc-transcript" \
   2> /dev/null || true
 check_texts eval-opencode-transcript "$work/eval-oc-transcript" "+deepseek/deepseek-flash" "+--format" \
-  "-stream-json" "+**Accuracy** 0/0" "+**Invalid runs** 1 (not scored)" \
-  "+the log quotes the answer key (the why of drift, bug and env)"
+  "-stream-json" "+opencode's database is ready for the parallel runs: /stub/opencode.db" \
+  "+**Accuracy** 0/1 (0%)" "+**Invalid runs** 1 (not scored)" \
+  "+the log quotes the answer key (the why of drift, bug and env)" \
+  "+| bug | shows correct total | REAL_BUG | none | no triage.json: opencode failed before the agent took a step (exit code 1): Unexpected error: database is locked |"
+# When the agent writes no triage.json, the report must say why. The texts are from real runs: opencode failing at
+# startup as parallel first runs raced to create its database, opencode's turn limit, a rejected permission.
+mkdir -p "$work/missing"
+set +e
+python3 - "$root/evals/triage/run-eval.py" "$work/missing" > "$work/eval-missing.log" 2>&1 <<'PY'
+import importlib.util
+import json
+import sys
+import types
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("run_eval", sys.argv[1])
+run_eval = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(run_eval)
+step = {"expected_output": "results/triage.json", "max_turns": 15}
+opencode = types.SimpleNamespace(engine="opencode", timeout=1200)
+claude = types.SimpleNamespace(engine="claude", timeout=1200)
+started = json.dumps({"type": "step_start", "part": {}})
+
+
+def done(code, engine="opencode"):
+    return f"::error::The triage agent did not write results/triage.json ({engine} exit code {code})."
+
+
+samples = [
+    ("locked", opencode, 1, f"\x1b[91m\x1b[1mError: \x1b[0mUnexpected error\n\ndatabase is locked\n{done(1)}"),
+    ("migration", opencode, 1, "Error: Unexpected error\n\nFailed query: \n  CREATE TABLE `workspace` (\n"
+                               f"    `id` text PRIMARY KEY,\n{done(1)}"),
+    ("turns", opencode, 1, f"{started}\n::warning::opencode reached the 450s limit that stands in for MAX_TURNS=15.\n"
+                           f"{done(124)}"),
+    ("claude-turns", claude, 1, json.dumps({"type": "assistant", "message": {"content": []}}) + "\n"
+     + json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True}) + "\n" + done(1, "claude")),
+    ("timeout", opencode, 124, f"{started}\n\n[stopped after 1200s]\n"),
+    ("rejected", opencode, 1, f"{started}\n! permission requested: external_directory (/elsewhere/results/*); "
+                              f"auto-rejecting\n{done(0)}"),
+    ("tried", claude, 1, json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Write", "input": {"file_path": "/tmp/triage.json"}}]}}) + "\n" + done(0, "claude")),
+    ("last-words", opencode, 1, started + "\n" + json.dumps({"type": "text", "part": {"text": "No idea."}}) + "\n"
+     + done(0)),
+]
+ws = Path(sys.argv[2])
+for name, opts, code, out in samples:
+    print(f"{name}: {run_eval.missing_output(out, code, ws, step, opts)}")
+(ws / "triage.json").write_text("{}", encoding="utf-8")
+print(f"wrong-place: {run_eval.missing_output(started + chr(10) + done(0), 1, ws, step, opencode)}")
+PY
+code=$?
+set -e
+check_texts eval-explains-missing-output "$work/eval-missing.log" \
+  "+locked: opencode failed before the agent took a step (exit code 1): Unexpected error: database is locked" \
+  "+migration: opencode failed before the agent took a step (exit code 1): Unexpected error: Failed query: CREATE TABLE" \
+  "+turns: hit the turn limit: opencode reached the 450s limit that stands in for MAX_TURNS=15" \
+  "+claude-turns: hit the turn limit (15 turns)" "+timeout: the eval stopped the run after 1200s (--timeout)" \
+  "+rejected: opencode stopped when it auto-rejected a permission request: external_directory (/elsewhere/results/*)" \
+  "+tried: tried to write /tmp/triage.json instead of results/triage.json" \
+  "+last-words: the agent stopped without writing it (opencode exit code 0); its last message: \"No idea.\"" \
+  "+wrong-place: wrote triage.json instead of results/triage.json"
 
 # Hide mode, the default when CI is set, on a scratch clone of this repository whose answer key is the stub cases,
-# plus an old result file and a note that quotes a case's "why". In the env case the stub agent tries to read the
-# answer key: it must be gone by then, and that run must be reported as invalid and not scored.
+# plus an old result file and a note that quotes a case's "why". All of evals/ must be gone before the first agent
+# starts; the workspaces get the sample project from memory. In the env case the stub agent tries to read the answer
+# key: it must be gone by then, and that run must be reported as invalid and not scored. The result file goes to
+# evals/triage/results/ afterwards, where eval-triage.yml uploads it from.
 hide_src="$work/hide-src"
 mkdir -p "$hide_src"
 cp -R "$root/." "$hide_src/"
@@ -773,14 +845,14 @@ set +e
 (cd "$work/hide-repo" && env CI=true PATH="$eval_bin:$PATH" EVAL_STUB_ARGS="$work/hide-args.txt" \
   EVAL_STUB_PEEK="$work/hide-repo/evals/triage/cases.jsonl" EVAL_STUB_PEEK_ON="home page loads" SKIP_MCP_WARMUP=1 \
   GITHUB_STEP_SUMMARY="$work/hide-summary.md" python3 evals/triage/run-eval.py --engine claude --jobs 1 \
-  --out "$work/hide-results" --work-dir "$work/hide-run" > "$work/hide.log" 2>&1)
+  --work-dir "$work/hide-run" > "$work/hide.log" 2>&1)
 code=$?
 set -e
-{ cat "$work/hide-summary.md" "$work"/hide-results/*.json "$work/hide.log" "$work/hide-run/logs/env-r1.log"; } \
-  > "$work/hide-transcript" 2> /dev/null || true
+{ cat "$work/hide-summary.md" "$work"/hide-repo/evals/triage/results/*.json "$work/hide.log" \
+    "$work/hide-run/logs/env-r1.log"; } > "$work/hide-transcript" 2> /dev/null || true
 check_texts eval-hide-answers-in-ci "$work/hide-transcript" \
-  "+  evals/triage/cases.jsonl  (the cases)" "+  evals/triage/results/old-run.json  (a result file" \
-  "+  notes.txt  (drift: its why" "+  tests/run-tests.sh  (drift: its why" "+  .git  (" \
+  "+  evals/  (the eval: its cases, result files" "-  evals/triage/" \
+  "+  notes.txt  (drift: its why" "+  tests/run-tests.sh  (drift: its why" "+  .git/  (" \
   "+Answer key deleted from the checkout before the first agent started" \
   "+drift run 1: got SELECTOR_DRIFT" "-run 1: expected" "+No such file or directory" "-never-shown-to-the-agent" \
   "+**Accuracy** 1/2 (50%)" "+**Critical: REAL_BUG classified as SELECTOR_DRIFT** 1" "+**Invalid runs** 1 (not scored)" \
@@ -788,11 +860,16 @@ check_texts eval-hide-answers-in-ci "$work/hide-transcript" \
   "+\"invalid\": 1," "+\"scored\": 2," "+\"invalid\": \"the log mentions cases.jsonl"
 present=""
 missing=""
-for f in evals/triage/cases.jsonl evals/triage/results/old-run.json notes.txt tests/run-tests.sh .git; do
+for f in notes.txt tests/run-tests.sh .git; do
   if [ -e "$work/hide-repo/$f" ]; then present+=" $f"; fi
 done
-for f in evals/triage/project/package.json evals/triage/run-eval.py evals/README.md agents/common/triage.md \
-  AGENT-RULES.md README.md; do
+# Only the new result file may be in evals/: written after the last agent finished.
+left_in_evals="$(cd "$work/hide-repo" && find evals -type f 2> /dev/null || true)"
+if [ "$(printf '%s' "$left_in_evals" | grep -c .)" -ne 1 ] \
+  || [[ "$left_in_evals" != evals/triage/results/*-claude-default.json ]]; then
+  present+=" evals/:[${left_in_evals//$'\n'/,}]"
+fi
+for f in agents/common/triage.md AGENT-RULES.md README.md scripts/run-agent.sh settings/claude-settings.json; do
   if [ ! -e "$work/hide-repo/$f" ]; then missing+=" $f"; fi
 done
 if [ "$code" -eq 0 ] && [ -z "$present$missing" ]; then

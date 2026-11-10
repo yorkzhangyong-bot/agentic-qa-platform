@@ -17,10 +17,15 @@ from test-and-heal.yml, and its classification in results/triage.json is compare
 The answer key is kept away from the agent:
 - No file that goes into a workspace may give an answer away (a case's "why", or its test name near a label) or
   mention cases.jsonl or evals/; otherwise the eval doesn't run. --check checks this too.
-- With --hide-answers, the default when CI is set, the cases are read into memory; then the cases file, the result
-  files, every other file in this checkout that gives an answer away, and .git (its history holds them all) are
+- With --hide-answers, the default when CI is set, the cases and the sample project are read into memory; then all
+  of evals/ (the cases, the result files, the docs, the project and this script), the cases file if it is
+  elsewhere, every other file in this checkout that gives an answer away, and .git (its history holds them all) are
   deleted before the first agent starts. This is meant for throwaway CI checkouts: except in the checkout of a
   GitHub Actions job, it refuses while .git holds work that is on no remote.
+- When the agent writes no results/triage.json, the report says why, from the run's log and workspace: the turn
+  limit, the eval's --timeout, an engine error, a rejected permission, a file in the wrong place, or else the
+  agent's last message. opencode's database is created once before the parallel runs, which would otherwise race
+  to create it and fail at startup.
 - The engine writes a full transcript to the run's log: its JSON event stream, with every tool call and result. A
   run whose transcript mentions cases.jsonl, evals/ or this checkout's path, or quotes a case's "why", is INVALID:
   reported, but not scored.
@@ -58,7 +63,8 @@ from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-EVAL_DIR = ROOT / "evals" / "triage"
+EVALS = ROOT / "evals"
+EVAL_DIR = EVALS / "triage"
 PROJECT = EVAL_DIR / "project"
 CASES = EVAL_DIR / "cases.jsonl"
 RESULTS = EVAL_DIR / "results"
@@ -84,6 +90,7 @@ LABEL = re.compile(r"\b(?:" + "|".join(LABELS) + r")\b")
 NEAR = 3       # a test name this many lines from a label gives its answer away (a result file's records span lines)
 MIN_WHY = 20   # a shorter "why" can't give an answer away by itself, and would match by chance
 POINTERS = (("cases.jsonl", r"cases\.jsonl"), ("evals/", r"evals[/\\]"))  # where the answer key lives
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 BASH = os.environ.get("EVAL_BASH") or shutil.which("bash") or "bash"
 print_lock = threading.Lock()
 
@@ -325,23 +332,30 @@ def workspace_leaks(cases):
     return errors
 
 
+def load_project():
+    """The sample project's files and modes, read once: --hide-answers deletes evals/, the project included, before
+    the workspaces are built from it."""
+    return {path.relative_to(PROJECT).as_posix(): (path.read_bytes(), path.stat().st_mode & 0o777)
+            for path in sorted(PROJECT.rglob("*")) if path.is_file()}
+
+
 def answer_files(cases, cases_file):
-    """What --hide-answers deletes, and why: the cases file, the result files, every other file in this checkout
-    that gives an answer away, and .git, whose history holds them all."""
+    """What --hide-answers deletes, and why: all of evals/ (the cases, the result files, the docs, the sample project
+    and this script), the cases file if it is elsewhere, every other file in this checkout that gives an answer
+    away, and .git, whose history holds them all."""
     found = {}
-    for path in (cases_file, CASES):
-        if path.is_file():
-            found.setdefault(path.resolve(), "the cases")
+    if EVALS.is_dir():
+        found[EVALS] = ("the eval: its cases, result files, docs, sample project and this script; the workspaces get "
+                        "the project from memory")
+    if cases_file.is_file() and not inside(cases_file, EVALS):
+        found[cases_file.resolve()] = "the cases"
     keep = {path.resolve() for path in workspace_inputs()}
     for folder, dirs, names in os.walk(ROOT):
-        dirs[:] = sorted(d for d in dirs if d != ".git")
+        dirs[:] = sorted(d for d in dirs if d != ".git" and Path(folder, d) != EVALS)
         for name in sorted(names):
             path = Path(folder, name)
             resolved = path.resolve()
             if resolved in found or resolved in keep or path.is_symlink() or not path.is_file():
-                continue
-            if inside(path, RESULTS):
-                found[resolved] = "a result file: every run in it has its expected label"
                 continue
             hits = giveaways(read_any(path), cases)
             if hits:
@@ -353,8 +367,12 @@ def answer_files(cases, cases_file):
     return found
 
 
+def display(path):
+    return relative(path) + ("/" if path.is_dir() and not path.is_symlink() else "")
+
+
 def listing(files):
-    return "\n".join(f"  {relative(path)}  ({why})" for path, why in files.items())
+    return "\n".join(f"  {display(path)}  ({why})" for path, why in files.items())
 
 
 def ci_is_set():
@@ -385,18 +403,20 @@ def unsaved_work():
 
 
 def hide_answers(cases, cases_file):
-    """Delete the answer key (see answer_files), whose cases are in memory now, before the first agent starts."""
+    """Delete the answer key (see answer_files) before the first agent starts; the cases and the sample project are
+    in memory by now. Returns the deleted paths as shown, and their listing."""
     lost = [] if throwaway_checkout() else unsaved_work()
     if lost:
         raise EvalError(f"--hide-answers would delete .git, which holds {' and '.join(lost)}. It is meant for "
                         "throwaway CI checkouts: run with CI unset or with --no-hide-answers, or commit and push first.")
     files = answer_files(cases, cases_file)
+    names, text = [display(path) for path in files], listing(files)
     for path in files:
         if path.is_dir() and not path.is_symlink():
             remove(path)
         else:
             path.unlink()
-    return files
+    return names, text
 
 
 def failing_line(lines, decl, error):
@@ -459,9 +479,14 @@ def rerun_shim(case, failure_text):
             f"cat <<'{marker}'\n{output}{marker}\nexit {code}\n")
 
 
-def build_workspace(case, ws, engine, model, log):
+def build_workspace(case, ws, project, engine, model, log):
     """The workspace of a failed CI run with this one failure; returns its entry in results/failures.json."""
-    shutil.copytree(PROJECT, ws)
+    ws.mkdir(parents=True)
+    for name, (data, mode) in project.items():
+        target = ws / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        target.chmod(mode)
     test_file = ws / case["file"]
     if not test_file.is_file():
         title = case["name"].split(f" {SEP} ")[-1].replace("\\", "\\\\").replace("'", "\\'")
@@ -560,10 +585,108 @@ def log_leak(output, work_dir, cases):
     return f"the log {' and '.join(reasons)}", f"{ELLIPSIS}{context}{ELLIPSIS}"
 
 
+def dig(value, *keys):
+    for key in keys:
+        value = value.get(key) if isinstance(value, dict) else None
+    return value
+
+
+def transcript(out):
+    """The engine's JSON events and its other output lines, without ANSI colours."""
+    events, lines = [], []
+    for line in ANSI.sub("", out).splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                event = json.loads(line)
+            except ValueError:
+                event = None
+            if isinstance(event, dict):
+                events.append(event)
+                continue
+        if line:
+            lines.append(line)
+    return events, lines
+
+
+def write_attempts(events):
+    """(path, error) for each file the agent tried to write or edit: opencode's and Claude Code's tool calls."""
+    attempts = []
+    for event in events:
+        if dig(event, "part", "tool") in ("write", "edit"):
+            failed = dig(event, "part", "state", "status") == "error"
+            attempts.append((str(dig(event, "part", "state", "input", "filePath") or ""),
+                             str(dig(event, "part", "state", "error") or "") if failed else ""))
+        content = dig(event, "message", "content")
+        for item in content if event.get("type") == "assistant" and isinstance(content, list) else []:
+            if dig(item, "type") == "tool_use" and dig(item, "name") in ("Write", "Edit"):
+                attempts.append((str(dig(item, "input", "file_path") or ""), ""))
+    return attempts
+
+
+def last_message(events, lines):
+    """The agent's last text: from the JSON events, or the engine's plain output if there are none."""
+    texts = [str(dig(event, "part", "text")) for event in events if event.get("type") == "text"
+             and dig(event, "part", "text")]
+    for event in events:
+        content = dig(event, "message", "content")
+        if event.get("type") == "assistant" and isinstance(content, list):
+            texts += [str(item["text"]) for item in content if dig(item, "type") == "text" and dig(item, "text")]
+    if not events:
+        texts = [line for line in lines if not line.startswith("::")]
+    return " ".join(texts[-1].split()) if texts else ""
+
+
+def missing_output(out, code, ws, step, opts):
+    """Why the agent wrote no output file, from run-agent.sh's output, the engine's transcript and the workspace:
+    the eval's --timeout, the turn limit, an engine error, a rejected permission, a file in the wrong place, or
+    else the agent's last message."""
+    expected = step["expected_output"]
+    name = expected.rsplit("/", 1)[-1]
+    events, lines = transcript(out)
+    exit_code = next((m.group(1) for line in lines if (m := re.search(r"\(\w+ exit code (\d+)\)", line))), "?")
+    if code == 124 and f"[stopped after {opts.timeout}s]" in out:
+        return f"the eval stopped the run after {opts.timeout}s (--timeout)"
+    limit = re.search(r"opencode reached the \d+s limit that stands in for MAX_TURNS=\d+", out)
+    if limit:
+        return f"hit the turn limit: {limit.group(0)}"
+    if any(event.get("subtype") == "error_max_turns" for event in events) or any(
+            "Reached max turns" in line for line in lines):
+        return f"hit the turn limit ({step['max_turns']} turns)"
+    errors = [str(dig(event, "error", "data", "message") or dig(event, "error", "message") or event.get("error")
+                  or "") for event in events if event.get("type") == "error"]
+    errors += [str(event.get("result") or event.get("subtype") or "") for event in events
+               if event.get("type") == "result" and event.get("is_error")]
+    at = next((n for n, line in enumerate(lines) if line.startswith("Error:")), None)
+    if at is not None:  # the engine's own error message, e.g. opencode's "Error: Unexpected error" and its cause
+        cause = " ".join(line for line in lines[at + 1:at + 4] if not line.startswith("::"))
+        errors.append(": ".join(part for part in (lines[at][len("Error:"):].strip(), cause) if part))
+    errors = [" ".join(error.split()) for error in errors if error.strip()]
+    if errors:
+        started = any(event.get("type") in ("step_start", "assistant") for event in events)
+        return (f"{opts.engine} failed{'' if started else ' before the agent took a step'} (exit code {exit_code}): "
+                f"{errors[0][:160]}")
+    rejected = next((m.group(1) for line in lines
+                     if (m := re.match(r"! permission requested: (.+?);? auto-rejecting", line))), None)
+    if rejected:
+        return f"{opts.engine} stopped when it auto-rejected a permission request: {rejected}"
+    elsewhere = sorted(path.relative_to(ws).as_posix() for path in ws.rglob(name)
+                       if path.is_file() and "node_modules" not in path.parts)
+    if elsewhere:
+        return f"wrote {elsewhere[0]} instead of {expected}"
+    for path, error in write_attempts(events):
+        if path.replace("\\", "/").rsplit("/", 1)[-1] == name:
+            if not path.replace("\\", "/").endswith(expected):
+                return f"tried to write {path} instead of {expected}"
+            if error:
+                return f"writing {expected} failed: {' '.join(error.split())[:160]}"
+    last = last_message(events, lines)
+    return (f"the agent stopped without writing it ({opts.engine} exit code {exit_code})"
+            + (f'; its last message: "{last[:160]}"' if last else ""))
+
+
 def read_verdict(path, failure):
     """The agent's classification and reason for the failure, or an error saying why there is none."""
-    if not path.is_file():
-        return {"error": f"the agent wrote no {path.name}"}
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
     except ValueError as exc:
@@ -585,13 +708,13 @@ def read_verdict(path, failure):
     return verdict
 
 
-def run_trial(case, repeat, opts, step, work_dir, bin_dir, answer_key):
+def run_trial(case, repeat, opts, step, work_dir, bin_dir, project, answer_key):
     ws = work_dir / "workspaces" / f"{case['id']}-r{repeat}"
     trial = {"case": case["id"], "test": case["name"], "repeat": repeat, "expected": case["expected"], "got": "none",
              "reason": "", "exit_code": None, "seconds": 0.0, "error": "", "invalid": "", "invalid_context": ""}
     started = time.monotonic()
     with open(work_dir / "logs" / f"{case['id']}-r{repeat}.log", "w", encoding="utf-8", newline="\n") as log:
-        failure = build_workspace(case, ws, opts.engine, opts.model, log)
+        failure = build_workspace(case, ws, project, opts.engine, opts.model, log)
         if opts.dry_run:
             trial["got"] = "dry-run"
         else:
@@ -610,7 +733,11 @@ def run_trial(case, repeat, opts, step, work_dir, bin_dir, answer_key):
                 env["ANTHROPIC_MODEL"] = opts.model
             code, out = run([BASH, ".agentic-qa/scripts/run-agent.sh"], ws, env=env, timeout=opts.timeout, log=log)
             trial["exit_code"] = code
-            trial.update(read_verdict(ws / step["expected_output"], failure))
+            output = ws / step["expected_output"]
+            if output.is_file():
+                trial.update(read_verdict(output, failure))
+            else:
+                trial["error"] = f"no {output.name}: {missing_output(out, code, ws, step, opts)}"
             trial["invalid"], trial["invalid_context"] = log_leak(out, work_dir, answer_key)
     trial["seconds"] = round(time.monotonic() - started, 1)
     if not opts.keep:
@@ -727,6 +854,19 @@ def engine_version(engine):
     return (out.strip().splitlines() or ["unknown"])[0]
 
 
+def prepare_engine(engine, work_dir):
+    """Set-up that parallel runs must not race on. opencode creates and migrates its SQLite database on first use,
+    and several first runs at once fail with "database is locked" or a failed CREATE TABLE, so create it once now."""
+    if engine != "opencode":
+        return
+    code, out = run([BASH, "-c", "opencode db path"], work_dir, timeout=120)
+    if code:
+        say("run-eval: warning: couldn't create opencode's database before the parallel runs, so they may fail at "
+            f"startup: {' '.join(out.split())[:200]}", sys.stderr)
+    else:
+        say(f"run-eval: opencode's database is ready for the parallel runs: {(out.strip().splitlines() or ['?'])[-1]}")
+
+
 def warm_up_mcp():
     """Download the browser MCP server once, instead of in every workspace."""
     if os.environ.get("SKIP_MCP_WARMUP") == "1":
@@ -819,6 +959,7 @@ def main():
             "agent_rules_blob": git_info("hash-object", "AGENT-RULES.md"),
             "cases": {"file": relative(opts.cases), "count": len(cases), "sha256": hashlib.sha256(raw).hexdigest()},
         }
+        project = load_project()
         version = "" if opts.dry_run else engine_version(opts.engine)
         work_dir = (opts.work_dir or Path(tempfile.mkdtemp(prefix="triage-eval-"))).resolve()
         (work_dir / "workspaces").mkdir(parents=True, exist_ok=True)
@@ -827,17 +968,18 @@ def main():
         repeats = 1 if opts.dry_run else opts.repeats
         jobs = [(case, repeat) for repeat in range(1, repeats + 1) for case in cases]
         if not opts.dry_run:
+            prepare_engine(opts.engine, work_dir)
             warm_up_mcp()
-        hidden = {}
+        hidden = []
         if hide:
-            hidden = hide_answers(all_cases, opts.cases)
-            say("run-eval: answer key hidden: deleted before the first agent starts:\n" + listing(hidden))
+            hidden, text = hide_answers(all_cases, opts.cases)
+            say("run-eval: answer key hidden: deleted before the first agent starts:\n" + text)
         say(f"run-eval: {len(cases)} cases {TIMES} {repeats} run(s), {opts.jobs} at a time, engine {opts.engine} "
             f"{opts.model or 'default'}; logs in {work_dir / 'logs'}")
         trials, done = [], 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=opts.jobs) as pool:
-            futures = {pool.submit(run_trial, case, repeat, opts, step, work_dir, bin_dir, all_cases): (case, repeat)
-                       for case, repeat in jobs}
+            futures = {pool.submit(run_trial, case, repeat, opts, step, work_dir, bin_dir, project, all_cases):
+                       (case, repeat) for case, repeat in jobs}
             for future in concurrent.futures.as_completed(futures):
                 case, repeat = futures[future]
                 try:
@@ -878,7 +1020,7 @@ def main():
         "max_turns": step["max_turns"],
         "prompt": step["prompt"],
         **facts,
-        "deleted_before_agents": [relative(path) for path in hidden],
+        "deleted_before_agents": hidden,
     }
     summary = score(trials, opts.repeats)
     out = results_path(opts.out, meta["date"], opts.engine, meta["model"])

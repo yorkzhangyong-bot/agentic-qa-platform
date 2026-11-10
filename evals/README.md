@@ -41,6 +41,10 @@ What differs from CI, because the eval is offline:
   not only the final answer: Claude Code with `--output-format stream-json --verbose`, OpenCode with
   `--format json`. A wrapper on the agent's `PATH` adds the flags. `run-agent.sh` and what the agent may do are
   unchanged.
+- **Runs share one machine.** Up to `--jobs` agents run at once, where CI runs one per job on a fresh runner.
+  OpenCode creates and migrates its SQLite database on first use, and parallel first runs race on it: some fail at
+  startup with "database is locked" or a failed `CREATE TABLE`. So the eval creates the database once, with
+  `opencode db path`, before the parallel runs.
 
 ### Keeping the answer key from the agent
 
@@ -51,17 +55,20 @@ of its reach:
    the platform contains a case's `why`, or a case's test name within 3 lines of a label. It also refuses if such a
    file mentions `cases.jsonl` or `evals/`, because every run that read it would be invalid. `--check` checks this.
 2. **In CI, the answer key is deleted before the first agent starts.** This is `--hide-answers`, the default when
-   `CI` is set; `eval-triage.yml` passes it explicitly. `run-eval.py` reads the cases into memory, then deletes
-   from the checkout:
-   - `triage/cases.jsonl`, and the `--cases` file if it is another one;
-   - the files in `triage/results/`, since every run in them has its expected label;
+   `CI` is set; `eval-triage.yml` passes it explicitly. `run-eval.py` reads the cases and the sample project into
+   memory, then deletes from the checkout:
+   - all of `evals/`: the cases, the result files (every run in them has its expected label), this README, the
+     sample project and `run-eval.py` itself. Any of them leads to the answer key; the workspaces get the project
+     from memory;
+   - the `--cases` file, if it is outside `evals/`;
    - every other file that contains a case's `why` or its test name near a label. One is `tests/run-tests.sh`,
      whose stub cases reuse real test names;
    - `.git`, whose history holds all of them.
 
-   `--check` lists these files. Deleting `.git` loses whatever exists only there. So outside the checkout of a
-   GitHub Actions job, `--hide-answers` refuses while the repository has uncommitted changes, commits that are on
-   no remote, or stashes. If your shell sets `CI`, pass `--no-hide-answers` to run the eval locally.
+   `--check` lists what would be deleted. The result file is written to `triage/results/` once the last agent has
+   finished. Deleting `.git` loses whatever exists only there. So outside the checkout of a GitHub Actions job,
+   `--hide-answers` refuses while the repository has uncommitted changes, commits that are on no remote, or
+   stashes. If your shell sets `CI`, pass `--no-hide-answers` to run the eval locally.
 
    While the agents run, the progress lines show only the agents' answers, not the expected labels, because the
    job's log is on the same machine.
@@ -131,7 +138,14 @@ The report is printed and added to the job summary. It shows:
 - **Critical count:** `REAL_BUG` classified as `SELECTOR_DRIFT`. Each one sends a real bug to the healer, which could
   hide it, so this should be 0.
 - **Consistency** (with `repeats` above 1): cases that got the same answer in every run, and the mean agreement.
-- **Wrong answers:** every case with its expected label, what the agent said, and the agent's reason.
+- **Wrong answers:** every case with its expected label, what the agent said, and the agent's reason. When the
+  agent wrote no `results/triage.json`, the reason says why, from the run's log and workspace:
+  - the turn limit;
+  - the eval's `--timeout`;
+  - an engine error, with its message, noting whether it came before the agent's first step;
+  - a permission request the engine rejected, after which OpenCode stops;
+  - a `triage.json` written, or attempted, somewhere else;
+  - otherwise, the agent's last message.
 
 `triage/results/<date>-<engine>-<model>.json` holds the same numbers (`summary.scored` and `summary.invalid` count
 the runs) and every run: case, answer, reason, exit code, seconds, and `invalid` with `invalid_context` for an
