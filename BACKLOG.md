@@ -11,6 +11,7 @@
 - [ ] Limit Claude Code's Read, Grep and Glob to the repository: run-agent.sh allows them by name, so only AGENT-RULES.md keeps a Claude agent out of other folders. Without them in --allowedTools, 2.1.283 refuses a read outside and still reads the workspace; check that its own saved large tool outputs stay readable
 - [x] Upload Playwright test-results/**/error-context.md with the test artifact and give it to triage (and healer); update the triage eval to include matching snapshots at the same time
 - [ ] Tell the healer about error-context.md: the heal job restores it, but its first test run empties test-results/, so the healer must read it first (or run with --output)
+- [ ] Semantic locator check after healing: for each locator the healer changes, compare the element's role and accessible name before and after; if they differ, open the heal PR as a draft and list "before -> after" in the PR body; add test fixtures for match and mismatch
 - [ ] Later: weekly metrics report, flaky quarantine, test data handling, impact analysis, version tags, pytest framework, port bash scripts to Python
 
 ## Evaluation of the platform
@@ -28,6 +29,7 @@
 - [ ] Answer key of ~20 planted changes: ~10 real bugs, ~6 harmless UI changes (drift), rest env/flaky
 - [ ] Generation score: requirements covered, tests pass, human would keep them
 - [ ] Per-branch pipeline scores: detection (did a test fail), triage label, issue opened, real bug healed away (must be 0), drift healed honestly, false alarms
+- [ ] Plant a look-alike regression in the benchmark (a different element with a similar selector) and require healed-away = 0
 - [ ] Headline metric: real bugs reported / real bugs planted
 - [ ] Run the full benchmark for all three frameworks (Playwright, Cypress, Selenium) on the same app and answer key, one test folder per framework, and compare detection, healing, false alarms, cost and time per framework
 

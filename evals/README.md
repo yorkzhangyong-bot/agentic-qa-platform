@@ -259,6 +259,7 @@ than one run per case.
 | 2026-11-10 | `6d66802` | `6d66802` | agents continue after denied paths; FLAKY and ENV triage rules | opencode 1.19.5, `deepseek/deepseek-flash` | 31 × 3 | 90/93 (97%) | 0 | 0 | 31/31 | [42830002351](https://github.com/yorkzhangyong-bot/agentic-qa-platform/actions/runs/42830002351) |
 | 2026-11-10 | `743be99` | `743be99` | Playwright's error-context.md for each attempt, a page snapshot in 4 cases; snapshots on | opencode 1.19.5, `deepseek/deepseek-flash` | 31 × 3 | 89/93 (96%) | 0 | 0 | 30/31 | [42851132289](https://github.com/yorkzhangyong-bot/agentic-qa-platform/actions/runs/42851132289) |
 | 2026-11-10 | `743be99` | `743be99` | the same, snapshots off | opencode 1.19.5, `deepseek/deepseek-flash` | 31 × 3 | 87/93 (94%) | 0 | 0 | 31/31 | [42854283500](https://github.com/yorkzhangyong-bot/agentic-qa-platform/actions/runs/42854283500) |
+| 2026-11-10 | `1d42595` | `1d42595` | a page snapshot for every case whose page had loaded; a missing snapshot is no evidence; snapshots on | opencode 1.19.5, `deepseek/deepseek-flash` | 31 × 3 | 90/93 (97%) | 0 | 0 | 31/31 | [42861690940](https://github.com/yorkzhangyong-bot/agentic-qa-platform/actions/runs/42861690940) |
 
 The first row used a smaller, easier case set, the 20 seed cases, so it isn't directly comparable with the rows
 after it.
@@ -273,6 +274,9 @@ On `743be99` only 4 cases had a page snapshot, the ones that had it in the error
 
 After `743be99`, every case whose page had loaded has a snapshot, so later runs aren't directly comparable with
 these two.
+
+On `1d42595` the only miss was T23, in all 3 runs, a [known hard case](#known-hard-cases). T05, which missed once
+on `743be99`, was right in all 3 runs, and so was T25.
 
 ### Known hard cases
 
