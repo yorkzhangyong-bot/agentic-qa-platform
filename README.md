@@ -80,8 +80,8 @@ test-and-heal.yml
   config          _select-framework.yml validates the engine and reads frameworks/<framework>.json
   test            check out the commit, install, load-app-env.sh, run tests, write-summary.sh, upload "test-results"
   triage          check out the same commit, parse-report.sh → results/failures.json, stage-agents.sh,
-                  run-agent.sh triage → results/triage.json, write-summary.sh (with the classifications),
-                  upload "triage"
+                  run-agent.sh triage → results/triage.json, check-triage.sh (fails without a usable result),
+                  write-summary.sh (with the classifications), upload "triage"
   heal            run-agent.sh healer → results/heal-report.json, verification run (with APP_ENV),
                   anti-cheat.sh, run-agent.sh pr-writer → PR_BODY.md, open PR auto-heal/<run_id>
                   (or update + comment on the open auto-heal PR)
@@ -101,6 +101,8 @@ generate-tests.yml
   permissions and MCP config in the format of the selected engine.
 - **`scripts/run-agent.sh`** runs one agent non-interactively with its own turn budget. It fails if the agent
   didn't write its result file, instead of silently reporting "no changes".
+- **`scripts/check-triage.sh`** fails the triage job when there is no usable triage result, so heal and
+  report-defects are never skipped without an error.
 - **`scripts/write-summary.sh`** adds the test results to the job summary, with the triage classifications once
   triage has run (see [Job summary](#job-summary)).
 - **`scripts/report-defects.sh`** turns `REAL_BUG` failures into GitHub issues, without AI: `prepare` computes
@@ -139,7 +141,7 @@ OpenCode's known gaps:
   - `AGENTS.md`, a copy of `AGENT-RULES.md`;
   - `opencode.json`: the `browser` MCP server (`type: local`) merged with `settings/opencode-permissions.json`.
     Bash uses the same allow/deny list as Claude, edits are limited to the test directory, `results/` and
-    `PR_BODY.md`, and `webfetch` is denied.
+    `PR_BODY.md`, `webfetch` is denied, and so are paths outside the repository (`external_directory`).
 
 > **Healing and generation quality depend on the model.** Smaller or cheaper models misclassify failures more often,
 > pick weaker locators, and give up sooner. Every engine and model gets the same guardrails, `anti-cheat.sh` and human
@@ -167,7 +169,7 @@ OpenCode's known gaps:
 ├── settings/
 │   ├── claude-mcp.json          MCP server "browser" (@playwright/mcp, headless, pinned version)
 │   ├── claude-settings.json     Claude Code Bash allow/deny list
-│   └── opencode-permissions.json  OpenCode bash/edit/webfetch permissions ({TEST_DIR} filled in when staged)
+│   └── opencode-permissions.json  OpenCode bash/edit/webfetch/external_directory permissions ({TEST_DIR} filled in)
 ├── scripts/
 │   ├── fetch-spec.sh            spec file, Spec Kit folder, GitHub issue or Jira ticket → spec.md
 │   ├── parse-report.sh          JUnit XML (any framework) → results/failures.json
@@ -175,6 +177,7 @@ OpenCode's known gaps:
 │   ├── anti-cheat.sh            fails on forbidden paths, weakened assertions, skips, sleeps, long timeouts
 │   ├── stage-agents.sh          stages agents, rules, permissions and MCP config for ENGINE=claude|opencode
 │   ├── run-agent.sh             runs one agent on the selected engine, checks its expected output
+│   ├── check-triage.sh          fails the triage job when results/triage.json classifies nothing
 │   ├── report-defects.sh        REAL_BUG failures → fingerprinted candidates → GitHub issues (no AI)
 │   └── load-app-env.sh          APP_ENV secret → the test runs' environment, never an agent's
 ├── tests/                       fixture tests for the scripts (bash tests/run-tests.sh)
@@ -298,7 +301,10 @@ How it runs:
     classification and reason.
   - It uploads `results/triage.json` and `results/failures.json` as the `triage` artifact, which the next two jobs
     download.
-  - It fails if the triage agent doesn't write its report; then neither of the next two jobs runs.
+  - It fails when there is no usable triage result, and then neither of the next two jobs runs.
+    `scripts/check-triage.sh` reports why: the report lists no failing test case (usually a setup problem), the
+    agent wrote no `results/triage.json`, or the file classifies none of the failures. If it classifies only some
+    of them, a warning says so.
 - **`heal`** runs only if triage found `SELECTOR_DRIFT` items. It gets `contents: write` and `pull-requests: write`.
   - The job fails if the healer doesn't write its report.
   - If the healer changed files, a verification run executes the suite once more, with `APP_ENV`, before
@@ -666,10 +672,21 @@ These are **not** detected by the script and must be checked by the reviewer (th
     with a fake model, so no API key is needed. The tests check that `ls && env`, `ls; env`, `ls | env`,
     `echo $(env)`, `ls` + line break + `env`, backticks, `$VAR`, redirects and a quoted `|` are refused without
     running. They also check that `npx playwright test x.spec.ts`, `git status` and writing `results/triage.json`
-    still work, and that OpenCode refuses edits to application source. CI runs this on the engine versions the
-    workflows install by default.
+    still work, and that OpenCode refuses edits to application source. A file outside the repository must be
+    refused without ending the run (see below). CI runs this on the engine versions the workflows install by
+    default.
   - The test runners still execute code: a test file an agent writes can read the environment when it runs. Keep
     the engine key's spending capped, as above.
+- **Agents stay inside the repository.** `AGENT-RULES.md` tells every agent that everything it needs is in the
+  workspace, and never to list or read parent folders or other runs' folders.
+  - **OpenCode** enforces this with `external_directory: deny`. It refuses its read, grep, glob, edit and write
+    tools outside the repository, and shell commands such as `cat`, `cd` or `rm` with a path outside it. The agent
+    gets an error and carries on. OpenCode's default is `ask`: `opencode run` rejects every request it would ask
+    about, and in 1.19.5 a rejected request ends the run, so an agent that looked outside wrote no result. Its own
+    folder for truncated tool output stays readable. `ls` isn't checked for paths.
+  - **Claude Code** refuses `cat` outside the repository in `dontAsk` mode, and the agent carries on. Its Read,
+    Grep and Glob tools aren't limited by path, because `run-agent.sh` allows them by name, so there the rule
+    alone keeps an agent out.
 - **Checkouts use `persist-credentials: false`**, so agents can't push with the workflow token. Only
   `create-pull-request` pushes, after the guardrails pass.
 - **App secrets (`APP_ENV`) never reach an agent step.** Only test runs get them, masked in the logs; see
@@ -716,9 +733,12 @@ These are **not** detected by the script and must be checked by the reviewer (th
     invalid, and say why an agent wrote no `triage.json`. Each run must get its own folder, and a case's runs
     must not overlap. On a scratch clone, hide mode must delete all of `evals/` and the rest of the answer key
     before the agent looks for it, and must keep a `.git` that holds uncommitted work;
+  - `check-triage.sh`: a triage file that classifies the failures must pass; nothing to triage, or a triage file
+    that is missing, empty, broken or classifies none of the failures, must fail with its reason;
   - agent permissions (`tests/engine-permissions/`): the real `claude` and `opencode`, staged as in CI and driven
     by a fake model, must refuse chained, substituted, expanded and redirected commands, and must still run the
-    test command; see [Security](#security). Skipped for an engine that isn't installed, unless `REQUIRE_ENGINES=1`.
+    test command. They must refuse a file outside the repository, and the agent must then still write its result;
+    see [Security](#security). Skipped for an engine that isn't installed, unless `REQUIRE_ENGINES=1`.
 - `.github/workflows/ci.yml` runs on every push and pull request:
   - `shellcheck` on the scripts;
   - `actionlint` on the workflows;

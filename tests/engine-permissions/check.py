@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """check.py — test the agent permissions on a real agent engine, with a fake model in place of the API.
 
-For each case, fake_model.py asks the agent to run one shell command, or to write one file. The agent runs through
-scripts/run-agent.sh in a workspace staged by scripts/stage-agents.sh, as in CI, so the engine enforces exactly the
-permissions a CI run gets. A case that must be denied passes when the engine refused it and it left no trace: the
-canary (an environment variable only that command would print) shows up nowhere, and no file was written. A case
-that must work passes when it ran.
+For each case, fake_model.py asks the agent for one tool call: a shell command, or writing, reading or searching a
+file. The agent runs through scripts/run-agent.sh in a workspace staged by scripts/stage-agents.sh, as in CI, so the
+engine enforces exactly the permissions a CI run gets. A case that must be denied passes when the engine refused it
+and it left no trace: the canary (an environment variable only that command would print) shows up nowhere, and no
+file was written. A case that must work passes when it ran.
+
+The cases for paths outside the workspace take two steps: first reading a file next to the workspace that holds the
+canary, then writing results/triage.json. They pass when the read is refused and the agent goes on to write the
+file, so a refusal doesn't end the run; on OpenCode the refusal must come from its external_directory rule. A control
+case puts back OpenCode's default for that rule, "ask": `opencode run` rejects every request it would have to ask
+about, and a rejection ends the run, so there the file must not be written. OpenCode's own folder for truncated tool
+output must stay readable.
 
 No real model is called and no key is needed. The engine gets its own configuration and data directories, so your
 own settings, logins and plugins take no part, and no environment variable that looks like a secret reaches it.
@@ -39,8 +46,19 @@ FAKE_KEY = "sk-ant-api03-" + "permission-test-key-not-real-".ljust(93, "0") + "A
 SHIM = "PLAYWRIGHT-STUB-RAN"
 
 BOTH = ("claude", "opencode")
-# (command, expected, what shows that it ran, engines). "{canary}" stands for the run's canary; "file:<path>" for a
-# file in the workspace; "write:<path>" asks for the write tool instead of the shell.
+# Folders outside the workspace, under the work folder. Each holds a secret.txt with the run's canary.
+PLACES = {
+    "outside": ("outside",),                                  # next to the workspace, like another run's folder
+    "tool-output": ("xdg-data", "opencode", "tool-output"),   # where OpenCode saves a truncated tool output
+}
+OUTSIDE = "{outside}/secret.txt"
+THEN_WRITE = "write:results/triage.json"
+ASK_FOR_OUTSIDE = {"permission": {"external_directory": "ask"}}   # OpenCode's own default for paths outside
+# (steps, expected, what shows that it ran, engines[, OpenCode config to add]). steps is one step or a tuple of them:
+# a shell command, "write:<path>" (the write tool), "read:<path>" or "grep:<path>" (those tools); "{outside}" and
+# "{tool-output}" stand for the folders in PLACES. In the marker, "{canary}" stands for the run's canary, "file:<path>"
+# for a file in the workspace. expected: "allowed", "denied", "denied, continues" (the first step is refused, and the
+# last one, THEN_WRITE, still runs) or "stops" (the first step is refused, and the run ends there).
 CASES = [
     ("ls && env", "denied", "{canary}", BOTH),
     ("ls; env", "denied", "{canary}", BOTH),
@@ -56,6 +74,13 @@ CASES = [
     ("git status", "allowed", "branch", BOTH),
     ("write:results/triage.json", "allowed", "file:results/triage.json", BOTH),
     ("write:src/app.js", "denied", "file:src/app.js", ("opencode",)),  # Claude Code's edits aren't limited by path
+    # Paths outside the workspace. Claude Code's Read, Grep and Glob aren't limited by path (run-agent.sh allows them
+    # by name), so only OpenCode refuses those; both refuse `cat` outside the workspace.
+    ((f"read:{OUTSIDE}", THEN_WRITE), "denied, continues", "{canary}", ("opencode",)),
+    (("grep:{outside}", THEN_WRITE), "denied, continues", "{canary}", ("opencode",)),
+    ((f"cat {OUTSIDE}", THEN_WRITE), "denied, continues", "{canary}", BOTH),
+    ((f"read:{OUTSIDE}", THEN_WRITE), "stops", "{canary}", ("opencode",), ASK_FOR_OUTSIDE),
+    ("read:{tool-output}/secret.txt", "allowed", "{canary}", ("opencode",)),  # OpenCode allows it after every rule
 ]
 
 
@@ -111,7 +136,7 @@ def opencode_wrapper(work, base_env):
     return wrapper.parent
 
 
-def engine_env(engine, work, ws, base_env, port, canary, bin_dir):
+def engine_env(engine, work, ws, base_env, port, canary, bin_dir, config=None):
     env = dict(base_env, ENGINE=engine, AGENT="triage", PROMPT="Run the command you were given.", MAX_TURNS="4",
                PLATFORM_DIR=".agentic-qa", PERMTEST_CANARY=canary, CI="true", GITHUB_ACTIONS="true")
     if engine == "claude":
@@ -128,6 +153,7 @@ def engine_env(engine, work, ws, base_env, port, canary, bin_dir):
                      "models": {"fake": {"name": "fake", "tool_call": True,
                                          "limit": {"context": 100000, "output": 4096}}}}},
                  "mcp": {name: {"enabled": False} for name in servers}}
+        extra.update(config or {})  # merged after opencode.json, so its permission keys replace the staged ones
         env.update(OPENCODE_MODEL="permtest/fake", OPENCODE_CONFIG_CONTENT=json.dumps(extra),
                    OPENCODE_DISABLE_AUTOUPDATE="1", OPENCODE_DISABLE_MODELS_FETCH="1", OPENCODE_SECONDS_PER_TURN="30",
                    XDG_CONFIG_HOME=str(work / "xdg-config"), XDG_DATA_HOME=str(work / "xdg-data"),
@@ -136,23 +162,44 @@ def engine_env(engine, work, ws, base_env, port, canary, bin_dir):
     return env
 
 
-def run_case(engine, work, ws, base_env, bin_dir, command, marker):
-    """Run one case through the agent; return (tool offered, ran, canary leaked, refusals, engine output)."""
+TOOLS = {"write": ("Write", "write"), "read": ("Read", "read"), "grep": ("Grep", "grep")}  # (Claude Code, OpenCode)
+
+
+def step_tool(step, engine):
+    tools = TOOLS.get(step.partition(":")[0], ("Bash", "bash"))
+    return tools[engine == "opencode"]
+
+
+def run_case(engine, work, ws, base_env, bin_dir, steps, marker, config=None):
+    """Run one case through the agent. Returns (tools offered, ran, canary leaked, refusals, the first step's
+    refusal or None, engine output)."""
+    steps = [steps] if isinstance(steps, str) else list(steps)
     record, port_file = work / "record.jsonl", work / "port"
-    for path in (record, port_file, ws / "leak.txt", *([ws / marker[5:]] if marker.startswith("file:") else [])):
+    files = [ws / step[6:] for step in steps if step.startswith("write:")]
+    for path in (record, port_file, ws / "leak.txt", *files, *([ws / marker[5:]] if marker.startswith("file:") else [])):
         path.unlink(missing_ok=True)
     canary = "canary-" + secrets.token_hex(6)
-    write = command.startswith("write:")
-    request = f"write:{ws / command[6:]}" if write else command
-    tools = ("Write", "write") if write else ("Bash", "bash")
-    server = subprocess.Popen([sys.executable, str(FAKE_MODEL), request, str(record), str(port_file)],
+    places = {name: work.joinpath(*parts) for name, parts in PLACES.items()}
+    for folder in places.values():
+        write(folder / "secret.txt", f"{canary}\n")
+    requests = []
+    for step in steps:
+        for name, folder in places.items():  # forward slashes, which Git Bash on Windows reads too
+            step = step.replace("{%s}" % name, folder.as_posix())
+        kind, _, path = step.partition(":")
+        if kind in TOOLS:  # the tools get an absolute path in the platform's own form
+            requests.append(f"{kind}:{Path(path) if Path(path).is_absolute() else ws / path}")
+        else:
+            requests.append(step)
+    tools = {step_tool(step, engine) for step in steps}
+    server = subprocess.Popen([sys.executable, str(FAKE_MODEL), json.dumps(requests), str(record), str(port_file)],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         for _ in range(100):
             if port_file.exists() and port_file.read_text(encoding="utf-8"):
                 break
             time.sleep(0.05)
-        env = engine_env(engine, work, ws, base_env, port_file.read_text(encoding="utf-8"), canary, bin_dir)
+        env = engine_env(engine, work, ws, base_env, port_file.read_text(encoding="utf-8"), canary, bin_dir, config)
         try:
             proc = subprocess.run([BASH, ".agentic-qa/scripts/run-agent.sh"], cwd=ws, env=env,
                                   stdin=subprocess.DEVNULL, capture_output=True, timeout=300)
@@ -163,10 +210,11 @@ def run_case(engine, work, ws, base_env, bin_dir, command, marker):
         server.kill()
         server.wait()
     entries = [json.loads(line) for line in record.read_text(encoding="utf-8").splitlines()] if record.exists() else []
-    offered = any(name in tools for entry in entries for name in entry.get("tools") or [])
+    offered = tools <= {name for entry in entries for name in entry.get("tools") or []}
     results = [entry for entry in entries if "tool_result" in entry]
     texts = [entry["tool_result"] for entry in results]
     refusals = [entry["tool_result"] for entry in results if entry.get("is_error")]
+    first = next((entry["tool_result"] for entry in results if entry.get("step") == 0 and entry.get("is_error")), None)
     for line in output.splitlines():  # opencode's JSON events: the tool's state
         try:
             event = json.loads(line)
@@ -178,13 +226,43 @@ def run_case(engine, work, ws, base_env, bin_dir, command, marker):
             texts.append(str(state.get("output") or state.get("error") or ""))
             if state.get("status") == "error":
                 refusals.append(str(state.get("error") or ""))
+                if part.get("callID") == "call_permtest_0":
+                    first = str(state.get("error") or "")
     marker = marker.replace("{canary}", canary)
     if marker.startswith("file:"):
         ran = (ws / marker[5:]).exists()
     else:
         ran = marker in output or any(marker in text for text in texts)
     leaked = canary in output or any(canary in text for text in texts)
-    return offered, ran, leaked, refusals, output
+    return offered, ran, leaked, refusals, first, output
+
+
+def short(text, length=110):
+    return " ".join(str(text).split())[:length]
+
+
+def judge_refusal(engine, expected, first, leaked, wrote, output):
+    """(ok, detail) for a two-step case: the first step must be refused without reading the file. With "denied,
+    continues" the agent must then write the file; with "stops" the run must end at the refusal."""
+    if leaked:
+        return False, "the file was read: its canary reached the model"
+    if first is None:
+        return False, "no refusal reported: " + short(output, 200)
+    if engine == "opencode" and expected == "denied, continues" and '"permission":"external_directory"' not in first:
+        if "rejected permission" in first:
+            return False, ("OpenCode asked to allow it and `opencode run` rejected the request, instead of a deny "
+                           "rule refusing it; " + ("then the agent wrote results/triage.json" if wrote
+                                                   else "the run ended there"))
+        return False, "refused by another rule than external_directory: " + short(first)
+    if engine == "opencode" and expected == "stops" and "rejected permission" not in first:
+        return False, "refused, but not by rejecting a permission request: " + short(first)
+    if expected == "denied, continues" and not wrote:
+        return False, "refused, but the run ended there: " + short(first)
+    if expected == "stops" and wrote:
+        return False, "refused, but the run went on: " + short(first)
+    then = "then the agent wrote results/triage.json" if wrote else "and the run ended there"
+    rule = " by the external_directory rule" if engine == "opencode" and expected == "denied, continues" else ""
+    return True, f"refused{rule} ({short(first, 60)}); {then}"
 
 
 def main():
@@ -197,25 +275,32 @@ def main():
     ws = workspace(work, engine, base_env)
     bin_dir = opencode_wrapper(work, base_env) if engine == "opencode" else None
     failed = 0
-    for command, expected, marker, engines in CASES:
+    for steps, expected, marker, engines, *config in CASES:
         if engine not in engines:
             continue
         started = time.monotonic()
-        offered, ran, leaked, refusals, output = run_case(engine, work, ws, base_env, bin_dir, command, marker)
+        offered, ran, leaked, refusals, first, output = run_case(engine, work, ws, base_env, bin_dir, steps, marker,
+                                                                 *config)
         seconds = time.monotonic() - started
         if not offered:
-            ok, detail = False, "the engine offered the model no such tool: " + " ".join(output.split())[:200]
+            ok, detail = False, "the engine offered the model no such tool: " + short(output, 200)
         elif expected == "denied":
             ok = refusals and not ran and not leaked
             detail = ("the command ran" + (", and printed its canary" if leaked else "") if ran or leaked
-                      else "refused: " + " ".join(refusals[-1].split())[:110] if refusals
-                      else "no refusal reported: " + " ".join(output.split())[:200])
+                      else "refused: " + short(refusals[-1]) if refusals
+                      else "no refusal reported: " + short(output, 200))
+        elif expected in ("denied, continues", "stops"):
+            wrote = (ws / THEN_WRITE[len("write:"):]).exists()
+            ok, detail = judge_refusal(engine, expected, first, leaked, wrote, output)
         else:
             ok = ran and not refusals
-            detail = ("ran" if ok else "refused: " + " ".join(refusals[-1].split())[:110] if refusals
-                      else "it did not run: " + " ".join(output.split())[:200])
+            detail = ("ran" if ok else "refused: " + short(refusals[-1]) if refusals
+                      else "it did not run: " + short(output, 200))
         failed += not ok
-        print(f"{'ok' if ok else 'FAIL'}\t{engine} {expected} {command!r}\t{detail} ({seconds:.0f}s)", flush=True)
+        label = steps if isinstance(steps, str) else " then ".join(steps)
+        if config:
+            label += f" (with {json.dumps(config[0], separators=(',', ':'))})"
+        print(f"{'ok' if ok else 'FAIL'}\t{engine} {expected} {label!r}\t{detail} ({seconds:.0f}s)", flush=True)
     return 1 if failed else 0
 
 

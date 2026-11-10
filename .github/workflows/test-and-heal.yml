@@ -363,9 +363,7 @@ jobs:
           bash "$PLATFORM_DIR/scripts/parse-report.sh" "$REPORT_GLOB"
           count="$(jq 'length' results/failures.json)"
           echo "count=$count" >> "$GITHUB_OUTPUT"
-          if [ "$count" -eq 0 ]; then
-            echo "::warning title=Nothing to triage::The tests failed but the JUnit report contains no failing test cases. This usually means an environment or setup problem; check the 'Run tests' step."
-          fi
+          echo "Failing test cases to triage: $count"
 
       - name: Install agent engine
         if: steps.parse.outputs.count != '0'
@@ -409,6 +407,15 @@ jobs:
             echo "real_bugs=$bugs"
           } >> "$GITHUB_OUTPUT"
           echo "SELECTOR_DRIFT items: $drift (heal), REAL_BUG items: $bugs (report-defects)"
+
+      # heal and report-defects run only after this job succeeded, and only on what results/triage.json classifies.
+      # Without a triage result they would just be skipped, so the job fails here and says why: nothing to triage,
+      # no triage.json, or one that classifies none of the failures.
+      - name: Check the triage result
+        if: ${{ !cancelled() && steps.parse.outcome != 'skipped' }}
+        env:
+          TRIAGE_OUTCOME: ${{ steps.triage.outcome }}
+        run: bash "$PLATFORM_DIR/scripts/check-triage.sh"
 
       # The summary reads a fresh copy of the reports, because a re-run during triage can overwrite the ones in the
       # workspace (a single Maven test rewrites its class's report; Cypress may add a report for the spec).

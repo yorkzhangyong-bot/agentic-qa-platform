@@ -61,6 +61,10 @@ conflicts with them. If a task can only be done by breaking a rule, stop and rep
 ## Working agreements
 
 - Paths are relative to the repository root.
+- **Stay inside the workspace**, the repository root you start in. Everything you need is inside it: the tests and
+  their git history, `results/` and `.agentic-qa/`. Never list or read its parent folders or other runs' folders,
+  with any tool or command (`ls ..`, an absolute path elsewhere). If a path is refused, carry on with what the
+  workspace has.
 - The test directory is given in your task prompt. If it isn't, use the framework's `default_test_dir`.
 - The app under test runs at `$APP_URL`.
 - **Bash is restricted** by the engine's permission settings: `settings/claude-settings.json` for Claude Code,

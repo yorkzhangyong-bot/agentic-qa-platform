@@ -2,13 +2,18 @@
 """fake_model.py — a stand-in model API for the engine permission tests: no real model, no network, no key.
 
 It speaks the Anthropic Messages API (Claude Code, via ANTHROPIC_BASE_URL) and the OpenAI chat completions API
-(OpenCode, via an openai-compatible provider), streaming or not. To the first request that offers the tool it
-answers with one call of it: the shell tool running COMMAND or, for "write:<absolute path>", the write tool writing
-that file. When the engine sends back the tool's result, the server appends it to RECORD as a JSON line and ends
-the turn with a short text. Any other request gets a short text. Every request is logged to RECORD too, with the
-names of the tools it offered.
+(OpenCode, via an openai-compatible provider), streaming or not. It plays a fixed script of tool calls, one per
+turn. To the first request that offers the tools it answers with the first call; each time the engine sends back a
+tool's result, the server appends it to RECORD as a JSON line and answers with the next call, or, after the last
+one, ends the turn with a short text. Any other request gets a short text. Every request is logged to RECORD too,
+with the names of the tools it offered.
 
-Usage: python3 fake_model.py COMMAND RECORD PORT_FILE
+STEPS is one step, or a JSON array of steps. A step is a shell command, or:
+  write:<absolute path>  the write tool, writing "{}" to that file
+  read:<absolute path>   the read tool, reading that file
+  grep:<absolute path>   the grep tool, searching that file or folder for "canary"
+
+Usage: python3 fake_model.py STEPS RECORD PORT_FILE
 The server picks a free port on 127.0.0.1, writes it to PORT_FILE and serves until it is killed.
 """
 
@@ -16,15 +21,24 @@ import json
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-COMMAND, RECORD, PORT_FILE = sys.argv[1], sys.argv[2], sys.argv[3]
-WRITE = COMMAND[len("write:"):] if COMMAND.startswith("write:") else None
-# The call to make, as (Anthropic tool, input) and (OpenAI tool, arguments).
-if WRITE:
-    CLAUDE_CALL = ("Write", {"file_path": WRITE, "content": "{}\n"})
-    OPENAI_CALL = ("write", {"filePath": WRITE, "content": "{}\n"})
-else:
-    CLAUDE_CALL = ("Bash", {"command": COMMAND, "description": "Run the command under test"})
-    OPENAI_CALL = ("bash", {"command": COMMAND, "description": "Run the command under test"})
+STEPS, RECORD, PORT_FILE = sys.argv[1], sys.argv[2], sys.argv[3]
+STEPS = json.loads(STEPS) if STEPS.startswith("[") else [STEPS]
+
+
+def calls(step):
+    """The call for one step, as (Anthropic tool, input) and (OpenAI tool, arguments)."""
+    kind, _, path = step.partition(":")
+    if kind == "write" and path:
+        return ("Write", {"file_path": path, "content": "{}\n"}), ("write", {"filePath": path, "content": "{}\n"})
+    if kind == "read" and path:
+        return ("Read", {"file_path": path}), ("read", {"filePath": path})
+    if kind == "grep" and path:
+        return ("Grep", {"pattern": "canary", "path": path}), ("grep", {"pattern": "canary", "path": path})
+    return (("Bash", {"command": step, "description": "Run the command under test"}),
+            ("bash", {"command": step, "description": "Run the command under test"}))
+
+
+CLAUDE_CALLS, OPENAI_CALLS = zip(*(calls(step) for step in STEPS))
 
 
 def record(entry):
@@ -77,15 +91,17 @@ class Handler(BaseHTTPRequestHandler):
         results = [item for message in body.get("messages", []) if message.get("role") == "user"
                    and isinstance(message.get("content"), list)
                    for item in message["content"] if isinstance(item, dict) and item.get("type") == "tool_result"]
-        offered = any(tool.get("name") == CLAUDE_CALL[0] for tool in body.get("tools") or [])
+        offered = {tool.get("name") for tool in body.get("tools") or []}
         if results:
             last = results[-1]
-            record({"api": "anthropic", "tool_result": text_of(last.get("content")), "is_error": bool(last.get("is_error"))})
-            block = {"type": "text", "text": "Done."}
-        elif offered:
-            block = {"type": "tool_use", "id": "toolu_permtest", "name": CLAUDE_CALL[0], "input": CLAUDE_CALL[1]}
+            record({"api": "anthropic", "step": len(results) - 1, "tool_result": text_of(last.get("content")),
+                    "is_error": bool(last.get("is_error"))})
+        step = len(results)
+        if step < len(CLAUDE_CALLS) and CLAUDE_CALLS[step][0] in offered:
+            name, arguments = CLAUDE_CALLS[step]
+            block = {"type": "tool_use", "id": f"toolu_permtest_{step}", "name": name, "input": arguments}
         else:
-            block = {"type": "text", "text": "OK"}
+            block = {"type": "text", "text": "Done." if results else "OK"}
         stop = "tool_use" if block["type"] == "tool_use" else "end_turn"
         message = {"id": "msg_permtest", "type": "message", "role": "assistant", "model": body.get("model", "fake"),
                    "content": [block], "stop_reason": stop, "stop_sequence": None,
@@ -113,17 +129,19 @@ class Handler(BaseHTTPRequestHandler):
     # OpenAI chat completions API (OpenCode)
     def openai(self, body):
         messages = body.get("messages", [])
-        tools = [tool.get("function", {}).get("name") for tool in body.get("tools") or []]
+        tools = {tool.get("function", {}).get("name") for tool in body.get("tools") or []}
         results = [message for message in messages if message.get("role") == "tool"]
         if results:
-            record({"api": "openai", "tool_result": text_of(results[-1].get("content")), "is_error": None})
-            delta, finish = {"role": "assistant", "content": "Done."}, "stop"
-        elif OPENAI_CALL[0] in tools:
-            call = {"index": 0, "id": "call_permtest", "type": "function",
-                    "function": {"name": OPENAI_CALL[0], "arguments": json.dumps(OPENAI_CALL[1])}}
+            record({"api": "openai", "step": len(results) - 1, "tool_result": text_of(results[-1].get("content")),
+                    "is_error": None})
+        step = len(results)
+        if step < len(OPENAI_CALLS) and OPENAI_CALLS[step][0] in tools:
+            name, arguments = OPENAI_CALLS[step]
+            call = {"index": 0, "id": f"call_permtest_{step}", "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(arguments)}}
             delta, finish = {"role": "assistant", "content": None, "tool_calls": [call]}, "tool_calls"
         else:
-            delta, finish = {"role": "assistant", "content": "OK"}, "stop"
+            delta, finish = {"role": "assistant", "content": "Done." if results else "OK"}, "stop"
         usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
         base = {"id": "chatcmpl-permtest", "created": 1, "model": body.get("model", "fake")}
         if not body.get("stream"):

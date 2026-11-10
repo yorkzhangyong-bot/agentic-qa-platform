@@ -8,6 +8,7 @@
 - [ ] Small prompt rules borrowed from official Playwright agents (regex for dynamic data, no networkidle/waitForLoadState/page.evaluate, comment per plan step, expected result per plan step)
 - [ ] Prototype playwright-test MCP test_debug for healer and triage (branch only, merge only if evals improve)
 - [ ] Plan-review gate and spec review agent
+- [ ] Limit Claude Code's Read, Grep and Glob to the repository: run-agent.sh allows them by name, so only AGENT-RULES.md keeps a Claude agent out of other folders. Without them in --allowedTools, 2.1.283 refuses a read outside and still reads the workspace; check that its own saved large tool outputs stay readable
 - [ ] Upload Playwright test-results/**/error-context.md with the test artifact and give it to triage (and healer); update the triage eval to include matching snapshots at the same time
 - [ ] Later: weekly metrics report, flaky quarantine, test data handling, impact analysis, version tags, pytest framework, port bash scripts to Python
 

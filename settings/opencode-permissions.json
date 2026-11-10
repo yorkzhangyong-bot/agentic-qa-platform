@@ -36,6 +36,7 @@
       "*<*": "deny",
       "*\n*": "deny"
     },
-    "webfetch": "deny"
+    "webfetch": "deny",
+    "external_directory": "deny"
   }
 }

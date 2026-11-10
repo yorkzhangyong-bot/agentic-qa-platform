@@ -46,8 +46,9 @@ What differs from CI, because the eval is offline:
 
 ### Keeping the answer key from the agent
 
-The agent can read files outside its workspace (`cat` and `ls` are allowed), so the eval keeps the answer key out
-of its reach:
+The agent is told to stay inside its workspace, but it can still look outside: OpenCode refuses reads there but not
+`ls`, and Claude Code's Read, Grep and Glob aren't limited by path. So the eval keeps the answer key out of its
+reach:
 
 1. **Nothing in a workspace gives an answer away.** The eval refuses to run if a file from `triage/project/` or
    the platform contains a case's `why`, or a case's test name within 3 lines of a label. It also refuses if such a

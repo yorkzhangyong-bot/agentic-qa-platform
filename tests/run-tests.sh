@@ -15,6 +15,10 @@
 #   stage-agents.sh  Staging for claude and for opencode in a scratch repo must produce the expected files.
 #   run-agent.sh     With stub `claude` / `opencode` executables, the expected command lines must be built, and a
 #                    missing EXPECTED_OUTPUT must fail the run.
+#   check-triage.sh  A triage.json that classifies every failure must pass, and one that classifies some of them
+#                    must pass with a warning. Nothing to triage, a missing failures.json, a missing, empty or broken
+#                    triage.json, one without an "items" array, and one that classifies none of the failures must
+#                    each fail with the "No triage result" error and its reason.
 #   report-defects.sh  prepare on tests/report-defects/triage.json + failures.json must produce
 #                    defect-candidates.expected.json; fingerprints must match their definition, survive other timings,
 #                    ids and line numbers, and change with the error. publish runs with a stub `gh`: new issues, a
@@ -36,13 +40,17 @@
 #                    that agent's run as invalid and unscored, and refuse to delete a .git with uncommitted work. No
 #                    model API is called.
 #   agent permissions  tests/engine-permissions/check.py runs the real claude and opencode, as staged for CI, against
-#                    a fake model (fake_model.py) that asks for one tool call per case: `ls && env`, `ls; env`,
+#                    a fake model (fake_model.py) that plays a fixed script of tool calls: `ls && env`, `ls; env`,
 #                    `ls | env`, `echo $(env)`, `ls\nenv`, backticks, `$VAR`, redirects and a quoted `|` must be
 #                    refused without running; `npx playwright test x.spec.ts`, `git status` and writing
-#                    results/triage.json must work; OpenCode must refuse writing application source. Skipped when an
-#                    engine isn't installed, unless REQUIRE_ENGINES=1 (as in CI). The stage-agents.sh checks also
-#                    cover the permission files: no allow in an OpenCode agent file, the metacharacter denies after
-#                    every allow rule, and the same denies for Claude Code.
+#                    results/triage.json must work; OpenCode must refuse writing application source. A file outside
+#                    the workspace must be refused (`cat` on both engines; OpenCode's read and grep too, by its
+#                    external_directory rule), and the agent must then go on to write results/triage.json. With that
+#                    rule back at OpenCode's default "ask", the run must end at the refusal; OpenCode's folder for
+#                    truncated output must stay readable. Skipped when an engine isn't installed, unless
+#                    REQUIRE_ENGINES=1 (as in CI). The stage-agents.sh checks also cover the permission files: no allow
+#                    in an OpenCode agent file, the metacharacter denies after every allow rule, the same denies for
+#                    Claude Code, and external_directory denied in OpenCode.
 #
 # Usage: bash tests/run-tests.sh          (exit code 0 when every check passes)
 set -euo pipefail
@@ -338,6 +346,9 @@ else:
         expect(bash.get(f"*{char}*") == "deny" and list(bash).index(f"*{char}*") > last_allow,
                f"bash: *{char!r}* must be denied after every allow rule")
     expect(permission["webfetch"] == "deny", "webfetch must be denied")
+    # OpenCode's default for paths outside the workspace is "ask", and `opencode run` rejects every such request,
+    # which ends the run. A deny refuses the call and the agent carries on.
+    expect(permission.get("external_directory") == "deny", "external_directory must be denied, not asked")
 print("\n".join(problems))
 sys.exit(1 if problems else 0)
 PY
@@ -394,6 +405,55 @@ run_case opencode-agent 0 \
 run_case missing-output-fails 1 - ENGINE=claude AGENT=triage MAX_TURNS=7 EXPECTED_OUTPUT=results/triage.json STUB_WRITE=0
 run_case early-stop-with-output-passes 0 - ENGINE=opencode AGENT=healer MAX_TURNS=7 EXPECTED_OUTPUT=results/heal-report.json STUB_EXIT=3
 run_case unknown-engine-fails 2 - ENGINE=gemini AGENT=triage MAX_TURNS=7
+
+echo
+echo "check-triage.sh"
+checks="$work/check-triage"
+triage_check() {  # triage_check <name> <exit> <text> <failures.json or -> <triage.json or -> [VAR=value...]
+  # Exit 1 must come with the "No triage result" error; exit 0 with no error, and no warning unless <text> is one.
+  local name="$1" want_code="$2" want_text="$3" failures="$4" triage="$5" code fine=1
+  shift 5
+  rm -rf "$checks"
+  mkdir -p "$checks/results"
+  [ "$failures" = - ] || printf '%s' "$failures" > "$checks/results/failures.json"
+  [ "$triage" = - ] || printf '%s' "$triage" > "$checks/results/triage.json"
+  set +e
+  (cd "$checks" && env "$@" bash "$root/scripts/check-triage.sh" > "$work/check-triage.log" 2>&1)
+  code=$?
+  set -e
+  grep -qF -- "$want_text" "$work/check-triage.log" || fine=0
+  if [ "$want_code" -eq 1 ]; then
+    grep -qF "::error title=No triage result::" "$work/check-triage.log" || fine=0
+    grep -qF "heal and report-defects don't run" "$work/check-triage.log" || fine=0
+  else
+    ! grep -qF "::error" "$work/check-triage.log" || fine=0
+    [[ "$want_text" == ::warning* ]] || ! grep -qF "::warning" "$work/check-triage.log" || fine=0
+  fi
+  if [ "$code" -eq "$want_code" ] && [ "$fine" -eq 1 ]; then
+    ok "$name"
+  else
+    bad "$name" "exit $code (want $want_code), want the text: $want_text"$'\n'"$(cat "$work/check-triage.log")"
+  fi
+}
+two='[{"name":"a","classname":"a.spec.ts"},{"name":"b","classname":"b.spec.ts"}]'
+triage_check classifies-every-failure 0 "classifies 2 item(s) for the 2 failing tests" "$two" \
+  '{"items":[{"name":"a","classification":"REAL_BUG"},{"name":"b","classification":"FLAKY"}]}'
+triage_check classifies-some-failures 0 \
+  "::warning title=Some failures not triaged::results/triage.json classifies 1 of the 2 failing tests" \
+  "$two" '{"items":[{"name":"a","classification":"ENV"}]}'
+triage_check no-triage-file 1 "The triage agent wrote no results/triage.json for the 2 failing tests" "$two" - \
+  TRIAGE_OUTCOME=failure
+triage_check triage-agent-skipped 1 "The triage agent didn't run, because an earlier step failed" "$two" - \
+  TRIAGE_OUTCOME=skipped
+triage_check empty-triage-file 1 "The triage agent wrote no results/triage.json" "$two" ''
+triage_check triage-not-json 1 "results/triage.json isn't valid JSON" "$two" '{"items": ['
+triage_check triage-without-items 1 'isn'"'"'t a JSON object with an "items" array' "$two" '{}'
+triage_check triage-bare-list 1 'isn'"'"'t a JSON object with an "items" array' "$two" '[{"classification":"REAL_BUG"}]'
+triage_check triage-empty-items 1 "classifies none of the 2 failing tests" "$two" '{"items":[]}'
+triage_check triage-unknown-labels 1 "classifies none of the 2 failing tests" "$two" \
+  '{"items":[{"name":"a","classification":"selector drift"},{"name":"b"}]}'
+triage_check nothing-to-triage 1 "found no failing test case in their JUnit reports" '[]' -
+triage_check no-failures-file 1 "results/failures.json doesn't exist" - -
 
 echo
 echo "report-defects.sh"
@@ -995,7 +1055,8 @@ fi
 echo
 echo "agent permissions on the real engines (tests/engine-permissions/; a fake model, no API key)"
 # Chained, substituted, expanded and redirected commands must be refused, and the test command and the triage
-# output must still work, on each engine as staged for CI. This needs the engine CLIs: ci.yml installs the versions
+# output must still work, on each engine as staged for CI. Files outside the workspace must be refused without
+# ending the run. This needs the engine CLIs: ci.yml installs the versions
 # the workflows install by default and sets REQUIRE_ENGINES=1, so there a missing engine fails instead of skipping.
 if python3 - "$root" > "$work/engine-versions.log" 2>&1 <<'PY'
 import re
