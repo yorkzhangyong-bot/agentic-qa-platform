@@ -37,6 +37,37 @@ What differs from CI, because the eval is offline:
   from the error, the test and the git history.
 - **Re-runs are replayed.** If the agent re-runs the test, `npx playwright test` prints the recorded failure again
   (`node_modules/.bin/playwright` in the workspace). A case can set `"rerun": "pass"` to make the replay pass.
+- **The log is a full transcript.** The engine prints its JSON event stream, with every tool call and its result,
+  not only the final answer: Claude Code with `--output-format stream-json --verbose`, OpenCode with
+  `--format json`. A wrapper on the agent's `PATH` adds the flags. `run-agent.sh` and what the agent may do are
+  unchanged.
+
+### Keeping the answer key from the agent
+
+The agent can read files outside its workspace (`cat` and `ls` are allowed), so the eval keeps the answer key out
+of its reach:
+
+1. **Nothing in a workspace gives an answer away.** The eval refuses to run if a file from `triage/project/` or
+   the platform contains a case's `why`, or a case's test name within 3 lines of a label. It also refuses if such a
+   file mentions `cases.jsonl` or `evals/`, because every run that read it would be invalid. `--check` checks this.
+2. **In CI, the answer key is deleted before the first agent starts.** This is `--hide-answers`, the default when
+   `CI` is set; `eval-triage.yml` passes it explicitly. `run-eval.py` reads the cases into memory, then deletes
+   from the checkout:
+   - `triage/cases.jsonl`, and the `--cases` file if it is another one;
+   - the files in `triage/results/`, since every run in them has its expected label;
+   - every other file that contains a case's `why` or its test name near a label. One is `tests/run-tests.sh`,
+     whose stub cases reuse real test names;
+   - `.git`, whose history holds all of them.
+
+   `--check` lists these files. Deleting `.git` loses whatever exists only there. So outside the checkout of a
+   GitHub Actions job, `--hide-answers` refuses while the repository has uncommitted changes, commits that are on
+   no remote, or stashes. If your shell sets `CI`, pass `--no-hide-answers` to run the eval locally.
+
+   While the agents run, the progress lines show only the agents' answers, not the expected labels, because the
+   job's log is on the same machine.
+3. **Runs that went for the key don't count.** A run is **invalid** if its log mentions `cases.jsonl`, `evals/`
+   or the checkout's path, or quotes a case's `why`. The report lists it with what was found, and it is not
+   scored. Paths inside the eval's own work directory (workspaces and logs) don't count.
 
 ### Cases
 
@@ -84,13 +115,16 @@ Other options:
 - `--max-turns`;
 - `--timeout` (seconds per run, default 1200);
 - `--cases`, `--only`;
-- `--out` (result directory), `--work-dir` (workspaces and logs);
-- `--keep`.
+- `--out` (result directory), `--work-dir` (workspaces and logs; must be outside the repository);
+- `--keep`;
+- `--hide-answers` / `--no-hide-answers` (default: on when `CI` is set).
 
 ### Output
 
 The report is printed and added to the job summary. It shows:
-- **Accuracy:** correct runs out of all runs.
+- **Accuracy:** correct runs out of all scored runs.
+- **Invalid runs:** how many runs went for the answer key. They are not scored, and the **Invalid runs** table
+  lists each one with what its log showed.
 - **Per-category accuracy:** the same for each expected label.
 - **Confusion table:** expected labels (rows) against the agent's answers (columns). "none" counts runs without a
   valid answer.
@@ -99,12 +133,14 @@ The report is printed and added to the job summary. It shows:
 - **Consistency** (with `repeats` above 1): cases that got the same answer in every run, and the mean agreement.
 - **Wrong answers:** every case with its expected label, what the agent said, and the agent's reason.
 
-`triage/results/<date>-<engine>-<model>.json` holds the same numbers and every run: case, answer, reason, exit code
-and seconds. It also records what's needed to compare scores over time:
+`triage/results/<date>-<engine>-<model>.json` holds the same numbers (`summary.scored` and `summary.invalid` count
+the runs) and every run: case, answer, reason, exit code, seconds, and `invalid` with `invalid_context` for an
+invalid run. It also records what's needed to compare scores over time:
 - `model` and `engine_version`;
 - `triage_md.blob`: the git object id of `agents/common/triage.md` as tested. The same text always has the same id.
 - `triage_md.commit`, the last commit that changed it, and `triage_md.modified` for local changes;
-- `agent_rules_blob`, `platform_commit`, the prompt, the turn budget, and a hash of the cases file.
+- `agent_rules_blob`, `platform_commit`, the prompt, the turn budget, and a hash of the cases file;
+- `deleted_before_agents`: what `--hide-answers` deleted.
 
 The workflow uploads the result file as the artifact `triage-eval-results` and the agents' logs as
 `triage-eval-logs`. To keep the history, commit the result file to `evals/triage/results/`.
@@ -112,4 +148,5 @@ The workflow uploads the result file as the artifact `triage-eval-results` and t
 ### In CI
 
 `ci.yml` only checks the eval: it compiles `run-eval.py` and runs `--check`. `tests/run-tests.sh` also runs it end to
-end with a stub engine, to check the scoring. Neither calls a model API.
+end with a stub engine. That checks the scoring and the invalid-run check. It also checks hide mode on a scratch
+clone of the repository, never on the checkout itself. Neither calls a model API.

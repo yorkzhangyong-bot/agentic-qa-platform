@@ -12,8 +12,18 @@ workspace built the way the triage job of .github/workflows/test-and-heal.yml se
     .claude/, .mcp.json or …      staged by scripts/stage-agents.sh, as in CI
 
 The agent runs through scripts/run-agent.sh with the triage step's prompt, turn budget and output file, all read
-from test-and-heal.yml, and its classification in results/triage.json is compared with the case's label. A case's
-"expected" and "why" never reach the workspace.
+from test-and-heal.yml, and its classification in results/triage.json is compared with the case's label.
+
+The answer key is kept away from the agent:
+- No file that goes into a workspace may give an answer away (a case's "why", or its test name near a label) or
+  mention cases.jsonl or evals/; otherwise the eval doesn't run. --check checks this too.
+- With --hide-answers, the default when CI is set, the cases are read into memory; then the cases file, the result
+  files, every other file in this checkout that gives an answer away, and .git (its history holds them all) are
+  deleted before the first agent starts. This is meant for throwaway CI checkouts: except in the checkout of a
+  GitHub Actions job, it refuses while .git holds work that is on no remote.
+- The engine writes a full transcript to the run's log: its JSON event stream, with every tool call and result. A
+  run whose transcript mentions cases.jsonl, evals/ or this checkout's path, or quotes a case's "why", is INVALID:
+  reported, but not scored.
 
 Usage:
   python3 evals/triage/run-eval.py [--engine claude|opencode] [--model M] [--repeats N] [--jobs N] [--only IDS]
@@ -25,7 +35,7 @@ ANTHROPIC_MODEL; without it Claude Code uses its default model, recorded as "def
 
 Writes evals/triage/results/<date>-<engine>-<model>.json and prints a markdown report, which is also appended to
 $GITHUB_STEP_SUMMARY. Exit code: 0 once the eval ran, whatever the score; 1 if the cases, the CI prompt or a
-workspace are broken; 2 for a usage error.
+workspace are broken, or the answer key can't be hidden; 2 for a usage error.
 """
 
 import argparse
@@ -35,6 +45,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -49,6 +60,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 EVAL_DIR = ROOT / "evals" / "triage"
 PROJECT = EVAL_DIR / "project"
+CASES = EVAL_DIR / "cases.jsonl"
+RESULTS = EVAL_DIR / "results"
 WORKFLOW = ROOT / ".github" / "workflows" / "test-and-heal.yml"
 TRIAGE_AGENT = "agents/common/triage.md"
 LABELS = ("SELECTOR_DRIFT", "REAL_BUG", "FLAKY", "ENV")
@@ -61,12 +74,16 @@ GIT_IDENTITY = {"GIT_AUTHOR_NAME": "Sample Dev", "GIT_AUTHOR_EMAIL": "dev@exampl
                 "GIT_COMMITTER_NAME": "Sample Dev", "GIT_COMMITTER_EMAIL": "dev@example.com",
                 "GIT_AUTHOR_DATE": "2026-01-15T10:00:00Z", "GIT_COMMITTER_DATE": "2026-01-15T10:00:00Z"}
 SEP = "\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK}"  # Playwright's title separator
-DOT, TIMES, NONE = "\N{MIDDLE DOT}", "\N{MULTIPLICATION SIGN}", "\N{EM DASH}"
+DOT, TIMES, NONE, ELLIPSIS = "\N{MIDDLE DOT}", "\N{MULTIPLICATION SIGN}", "\N{EM DASH}", "\N{HORIZONTAL ELLIPSIS}"
 MARKDOWN = re.compile(r"([\\`*_\[\]<>|~&$])")
 TEST_CALL = re.compile(r"""^(\s*)test(?:\.\w+)?\(\s*(['"`])(.*?)\2""")
 LOCATOR = re.compile(r"(?:getBy\w+|locator|frameLocator)\((?:[^()]|\([^()]*\))*\)")
 MATCHER = re.compile(r"\.(to\w+)\(")
 ACTION = re.compile(r"\b(?:locator|page|frame)\.(\w+)")
+LABEL = re.compile(r"\b(?:" + "|".join(LABELS) + r")\b")
+NEAR = 3       # a test name this many lines from a label gives its answer away (a result file's records span lines)
+MIN_WHY = 20   # a shorter "why" can't give an answer away by itself, and would match by chance
+POINTERS = (("cases.jsonl", r"cases\.jsonl"), ("evals/", r"evals[/\\]"))  # where the answer key lives
 BASH = os.environ.get("EVAL_BASH") or shutil.which("bash") or "bash"
 print_lock = threading.Lock()
 
@@ -188,9 +205,9 @@ def triage_step(workflow=WORKFLOW):
     return {"prompt": prompt, "max_turns": int(max_turns), "expected_output": expected_output}
 
 
-def load_cases(path):
+def load_cases(text):
     cases, errors, seen = [], [], set()
-    for n, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
+    for n, line in enumerate(text.splitlines(), 1):
         if not line.strip():
             continue
         try:
@@ -223,6 +240,18 @@ def load_cases(path):
     return cases, errors
 
 
+def read_cases(path):
+    """The cases file's bytes, its cases and its errors, read once: --hide-answers deletes the file afterwards."""
+    try:
+        raw = path.read_bytes()
+        text = raw.decode("utf-8-sig")
+    except OSError as exc:
+        return b"", [], [f"can't read it: {exc.strerror or exc}"]
+    except UnicodeDecodeError:
+        return b"", [], ["not UTF-8"]
+    return (raw, *load_cases(text))
+
+
 def find_test(source, name):
     """1-based line and column of test('<title>', …), where the title is the last part of the case's name."""
     title = name.split(f" {SEP} ")[-1]
@@ -242,6 +271,132 @@ def fixture_warnings(cases):
         elif find_test(source.read_text(encoding="utf-8"), case["name"]) is None:
             warnings.append(f"{case['id']}: {case['file']} has no test titled {case['name']!r}")
     return warnings
+
+
+def inside(path, folder):
+    try:
+        Path(path).resolve().relative_to(Path(folder).resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def read_any(path):
+    return path.read_bytes().decode("utf-8", "replace")
+
+
+def workspace_inputs():
+    """This repository's files that go into every workspace: the sample project and the platform parts."""
+    files = []
+    for source in (PROJECT, *(ROOT / part for part in PLATFORM_PARTS)):
+        files += sorted(p for p in source.rglob("*") if p.is_file()) if source.is_dir() else [source]
+    return files
+
+
+def giveaways(text, cases):
+    """The cases whose answer text gives away, with how: their "why", or their test name near a label."""
+    flat = " ".join(text.split())
+    lines = text.splitlines()
+    labelled = [n for n, line in enumerate(lines) if LABEL.search(line)]
+    found = []
+    for case in cases:
+        why = " ".join(case["why"].split())
+        title = case["name"].split(f" {SEP} ")[-1].strip()
+        if len(why) >= MIN_WHY and why in flat:
+            found.append((case["id"], "its why"))
+        elif labelled and title:
+            near = next((n for n, line in enumerate(lines)
+                         if title in line and any(abs(n - m) <= NEAR for m in labelled)), None)
+            if near is not None:
+                found.append((case["id"], f"its test name near a label, line {near + 1}"))
+    return found
+
+
+def workspace_leaks(cases):
+    """Errors for the files that go into every workspace and give an answer away, which no deletion can hide, or
+    mention where the answer key lives, which would make every run that reads them invalid."""
+    errors = []
+    for path in workspace_inputs():
+        text = read_any(path)
+        errors += [f"{relative(path)} gives away {case_id}'s answer ({how}), and it goes into every workspace"
+                   for case_id, how in giveaways(text, cases)]
+        errors += [f"{relative(path)} mentions {name}, so every run that reads it would be invalid"
+                   for name, pattern in POINTERS if re.search(pattern, text)]
+    return errors
+
+
+def answer_files(cases, cases_file):
+    """What --hide-answers deletes, and why: the cases file, the result files, every other file in this checkout
+    that gives an answer away, and .git, whose history holds them all."""
+    found = {}
+    for path in (cases_file, CASES):
+        if path.is_file():
+            found.setdefault(path.resolve(), "the cases")
+    keep = {path.resolve() for path in workspace_inputs()}
+    for folder, dirs, names in os.walk(ROOT):
+        dirs[:] = sorted(d for d in dirs if d != ".git")
+        for name in sorted(names):
+            path = Path(folder, name)
+            resolved = path.resolve()
+            if resolved in found or resolved in keep or path.is_symlink() or not path.is_file():
+                continue
+            if inside(path, RESULTS):
+                found[resolved] = "a result file: every run in it has its expected label"
+                continue
+            hits = giveaways(read_any(path), cases)
+            if hits:
+                found[resolved] = "; ".join(f"{case_id}: {how}" for case_id, how in hits[:3]) + (
+                    f"; {ELLIPSIS}" if len(hits) > 3 else "")
+    git_dir = ROOT / ".git"
+    if git_dir.exists() or git_dir.is_symlink():
+        found[git_dir] = "its history holds every version of these files"
+    return found
+
+
+def listing(files):
+    return "\n".join(f"  {relative(path)}  ({why})" for path, why in files.items())
+
+
+def ci_is_set():
+    return os.environ.get("CI", "").strip().lower() not in ("", "0", "false", "no")
+
+
+def throwaway_checkout():
+    """True for the checkout of a GitHub Actions job, which the runner throws away when the job ends."""
+    workspace = os.environ.get("GITHUB_WORKSPACE")
+    return os.environ.get("GITHUB_ACTIONS") == "true" and bool(workspace) and Path(workspace).resolve() == ROOT
+
+
+def unsaved_work():
+    """What deleting .git would lose: uncommitted changes, commits that are on no remote, stashed changes."""
+    if not (ROOT / ".git").exists():
+        return []
+    lost = []
+    for what, args in (("uncommitted changes", ("status", "--porcelain")),
+                       ("commits that are on no remote", ("rev-list", "-n", "1", "HEAD", "--branches", "--not",
+                                                          "--remotes")),
+                       ("stashed changes", ("stash", "list"))):
+        code, out = run(["git", *args], ROOT)
+        if code:
+            lost.append(f"work git can't check (git {args[0]} failed)")
+        elif out.strip():
+            lost.append(what)
+    return lost
+
+
+def hide_answers(cases, cases_file):
+    """Delete the answer key (see answer_files), whose cases are in memory now, before the first agent starts."""
+    lost = [] if throwaway_checkout() else unsaved_work()
+    if lost:
+        raise EvalError(f"--hide-answers would delete .git, which holds {' and '.join(lost)}. It is meant for "
+                        "throwaway CI checkouts: run with CI unset or with --no-hide-answers, or commit and push first.")
+    files = answer_files(cases, cases_file)
+    for path in files:
+        if path.is_dir() and not path.is_symlink():
+            remove(path)
+        else:
+            path.unlink()
+    return files
 
 
 def failing_line(lines, decl, error):
@@ -350,6 +505,61 @@ def build_workspace(case, ws, engine, model, log):
     return failures[0]
 
 
+def transcript_wrapper(work_dir, engine):
+    """A bin directory whose <engine> runs the real one with its full transcript on stdout: the engine's JSON event
+    stream, with every tool call and result, so the leak check sees what the agent did and not only its answer.
+    run-agent.sh and what the agent can do stay the same."""
+    code, out = run([BASH, "-c", f"command -v {engine}"], ROOT)
+    real = out.strip().splitlines()[-1] if code == 0 and out.strip() else ""
+    if not real:
+        raise EvalError(f"can't find the {engine} CLI on PATH")
+    real = shlex.quote(real)
+    if engine == "claude":
+        body = f'exec {real} "$@" --output-format stream-json --verbose\n'
+    else:
+        body = f'if [ "${{1:-}}" = run ]; then exec {real} "$@" --format json; fi\nexec {real} "$@"\n'
+    wrapper = work_dir / "bin" / engine
+    write(wrapper, "#!/usr/bin/env bash\n# Written by run-eval.py: the real engine, with its full transcript in the "
+                   "run's log.\n" + body)
+    wrapper.chmod(0o755)
+    return wrapper.parent
+
+
+def path_pattern(path):
+    """A regex for path as a log can show it: / or \\ (also JSON-escaped) between its parts, and on Windows also
+    bash's /c/… form."""
+    posix = Path(path).as_posix()
+    forms = [posix]
+    if re.match(r"[A-Za-z]:/", posix):
+        forms.append(f"/{posix[0]}{posix[2:]}")
+    return "|".join(r"[/\\]+".join(re.escape(part) for part in form.split("/")) for form in forms)
+
+
+def and_list(items):
+    return ", ".join(items[:-1]) + " and " + items[-1] if len(items) > 1 else "".join(items)
+
+
+def log_leak(output, work_dir, cases):
+    """Why an agent's log shows it went for the answer key, with where: (reason, context), or ("", "") if it didn't.
+    It did if the log mentions where the key lives, or quotes a case's "why" (in a JSON event stream, escaped).
+    Paths under work_dir, the workspaces and logs, which hold no answers, are cut first: only places outside count."""
+    flags = re.I if os.name == "nt" else 0
+    text = re.sub(path_pattern(work_dir), "<work-dir>", output, flags=flags)
+    found = [(name, text, m) for name, pattern in (*POINTERS, ("the checkout's path", path_pattern(ROOT)))
+             if (m := re.search(pattern, text, flags))]
+    plain = " ".join(re.sub(r"\\[nrt]", " ", text).replace('\\"', '"').replace("\\\\", "\\").split())
+    quoted = [(case["id"], m) for case in cases if len(why := " ".join(case["why"].split())) >= MIN_WHY
+              and (m := re.search(re.escape(why), plain))]
+    if not found and not quoted:
+        return "", ""
+    reasons = [f"mentions {and_list([name for name, *_ in found])}"] if found else []
+    if quoted:
+        reasons.append(f"quotes the answer key (the why of {and_list([case_id for case_id, _ in quoted])})")
+    source, m = (found[0][1], found[0][2]) if found else (plain, quoted[0][1])
+    context = " ".join(source[max(0, m.start() - 80):m.end() + 80].split())
+    return f"the log {' and '.join(reasons)}", f"{ELLIPSIS}{context}{ELLIPSIS}"
+
+
 def read_verdict(path, failure):
     """The agent's classification and reason for the failure, or an error saying why there is none."""
     if not path.is_file():
@@ -375,10 +585,10 @@ def read_verdict(path, failure):
     return verdict
 
 
-def run_trial(case, repeat, opts, step, work_dir):
+def run_trial(case, repeat, opts, step, work_dir, bin_dir, answer_key):
     ws = work_dir / "workspaces" / f"{case['id']}-r{repeat}"
     trial = {"case": case["id"], "test": case["name"], "repeat": repeat, "expected": case["expected"], "got": "none",
-             "reason": "", "exit_code": None, "seconds": 0.0, "error": ""}
+             "reason": "", "exit_code": None, "seconds": 0.0, "error": "", "invalid": "", "invalid_context": ""}
     started = time.monotonic()
     with open(work_dir / "logs" / f"{case['id']}-r{repeat}.log", "w", encoding="utf-8", newline="\n") as log:
         failure = build_workspace(case, ws, opts.engine, opts.model, log)
@@ -388,14 +598,20 @@ def run_trial(case, repeat, opts, step, work_dir):
             env = {**os.environ, "ENGINE": opts.engine, "AGENT": "triage", "PROMPT": step["prompt"],
                    "MAX_TURNS": str(step["max_turns"]), "EXPECTED_OUTPUT": step["expected_output"],
                    "PLATFORM_DIR": ".agentic-qa", "MCP_SERVER": "browser", "MCP_TIMEOUT": "60000",
-                   "FRAMEWORK": FRAMEWORK, "TEST_DIR": TEST_DIR, "APP_URL": ""}
+                   "FRAMEWORK": FRAMEWORK, "TEST_DIR": TEST_DIR, "APP_URL": "",
+                   "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"}  # the engine with a full transcript
+            for name in ("PWD", "OLDPWD"):  # they name this checkout; bash sets PWD to the workspace
+                env.pop(name, None)
+            if "GITHUB_WORKSPACE" in env:
+                env["GITHUB_WORKSPACE"] = str(ws)  # in CI it is the agent's own repository, not the platform's
             if opts.engine == "opencode":
                 env["OPENCODE_MODEL"] = opts.model
             elif opts.model:
                 env["ANTHROPIC_MODEL"] = opts.model
-            code, _ = run([BASH, ".agentic-qa/scripts/run-agent.sh"], ws, env=env, timeout=opts.timeout, log=log)
+            code, out = run([BASH, ".agentic-qa/scripts/run-agent.sh"], ws, env=env, timeout=opts.timeout, log=log)
             trial["exit_code"] = code
             trial.update(read_verdict(ws / step["expected_output"], failure))
+            trial["invalid"], trial["invalid_context"] = log_leak(out, work_dir, answer_key)
     trial["seconds"] = round(time.monotonic() - started, 1)
     if not opts.keep:
         remove(ws)
@@ -403,20 +619,24 @@ def run_trial(case, repeat, opts, step, work_dir):
 
 
 def score(trials, repeats):
+    """The scores over the valid runs: an invalid run, whose log points at the answer key, isn't scored."""
+    valid = [t for t in trials if not t["invalid"]]
     columns = (*LABELS, "none")
-    correct = sum(t["got"] == t["expected"] for t in trials)
-    per_label = {label: {"correct": sum(t["got"] == label for t in trials if t["expected"] == label),
-                         "total": sum(t["expected"] == label for t in trials)} for label in LABELS}
-    confusion = {expected: {got: sum(t["expected"] == expected and t["got"] == got for t in trials) for got in columns}
+    correct = sum(t["got"] == t["expected"] for t in valid)
+    per_label = {label: {"correct": sum(t["got"] == label for t in valid if t["expected"] == label),
+                         "total": sum(t["expected"] == label for t in valid)} for label in LABELS}
+    confusion = {expected: {got: sum(t["expected"] == expected and t["got"] == got for t in valid) for got in columns}
                  for expected in LABELS}
     by_case = {}
-    for trial in trials:
+    for trial in valid:
         by_case.setdefault(trial["case"], []).append(trial)
     agreement = {case: Counter(t["got"] for t in runs).most_common(1)[0][1] / len(runs) for case, runs in by_case.items()}
     return {
         "trials": len(trials),
+        "invalid": len(trials) - len(valid),
+        "scored": len(valid),
         "correct": correct,
-        "accuracy": round(correct / len(trials), 4) if trials else 0.0,
+        "accuracy": round(correct / len(valid), 4) if valid else 0.0,
         "per_category": per_label,
         "confusion": confusion,
         "critical_real_bug_as_selector_drift": confusion["REAL_BUG"]["SELECTOR_DRIFT"],
@@ -429,7 +649,7 @@ def score(trials, repeats):
 def md(text, limit=200):
     text = " ".join(str(text).split())
     if len(text) > limit:
-        text = text[:limit - 1].rstrip() + "\N{HORIZONTAL ELLIPSIS}"
+        text = text[:limit - 1].rstrip() + ELLIPSIS
     return MARKDOWN.sub(r"\\\1", text)
 
 
@@ -440,11 +660,15 @@ def ratio(part, whole):
 def report(meta, summary, trials):
     s, c = summary, summary["consistency"]
     lines = [f"## Triage eval: {meta['engine']} {DOT} {meta['model']}", "",
-             f"{c['cases']} cases {TIMES} {meta['repeats']} run(s) {DOT} engine `{meta['engine_version']}` {DOT} "
-             f"triage.md `{meta['triage_md']['blob'][:7]}`{' (modified)' if meta['triage_md']['modified'] else ''} "
-             f"{DOT} platform `{meta['platform_commit'][:7]}` {DOT} {meta['date']}", "",
-             f"**Accuracy** {ratio(s['correct'], s['trials'])} {DOT} "
-             f"**Critical: REAL_BUG classified as SELECTOR_DRIFT** {s['critical_real_bug_as_selector_drift']}"]
+             f"{meta['cases']['count']} cases {TIMES} {meta['repeats']} run(s) {DOT} engine `{meta['engine_version']}` "
+             f"{DOT} triage.md `{meta['triage_md']['blob'][:7]}`{' (modified)' if meta['triage_md']['modified'] else ''} "
+             f"{DOT} platform `{meta['platform_commit'][:7]}` {DOT} {meta['date']}", ""]
+    if meta["deleted_before_agents"]:
+        lines += ["Answer key deleted from the checkout before the first agent started: "
+                  + ", ".join(f"`{path}`" for path in meta["deleted_before_agents"]) + ".", ""]
+    lines.append(f"**Accuracy** {ratio(s['correct'], s['scored'])} {DOT} "
+                 f"**Critical: REAL_BUG classified as SELECTOR_DRIFT** {s['critical_real_bug_as_selector_drift']} "
+                 f"{DOT} **Invalid runs** {s['invalid']}" + (" (not scored)" if s["invalid"] else ""))
     if meta["repeats"] > 1:
         lines.append("")
         lines.append(f"**Consistency** {c['unanimous_cases']}/{c['cases']} cases gave the same answer in all "
@@ -456,11 +680,20 @@ def report(meta, summary, trials):
               "| Expected | " + " | ".join(columns) + " |", "| --- " * (len(columns) + 1) + "|"]
     lines += [f"| {expected} | " + " | ".join(str(row[got]) for got in columns) + " |"
               for expected, row in s["confusion"].items()]
-    wrong = {}
+    invalid = [t for t in trials if t["invalid"]]
+    if invalid:
+        lines += ["", f"### Invalid runs ({len(invalid)} of {s['trials']})", "",
+                  "Not scored: the agent's log mentions where the answer key lives (cases.jsonl, evals/ or the "
+                  "checkout's path).", "",
+                  "| Case | Run | Got | Why invalid |", "| --- | --- | --- | --- |"]
+        lines += [f"| {md(t['case'])} | {t['repeat']} | {t['got']} | {md(t['invalid'] + ': ' + t['invalid_context'])} |"
+                  for t in invalid]
+    by_case = {}
     for trial in trials:
-        wrong.setdefault(trial["case"], []).append(trial)
-    wrong = {case: runs for case, runs in wrong.items() if any(t["got"] != t["expected"] for t in runs)}
-    lines += ["", f"### Wrong answers ({len(wrong)} of {c['cases']} cases)", ""]
+        if not trial["invalid"]:
+            by_case.setdefault(trial["case"], []).append(trial)
+    wrong = {case: runs for case, runs in by_case.items() if any(t["got"] != t["expected"] for t in runs)}
+    lines += ["", f"### Wrong answers ({len(wrong)} of {len(by_case)} cases)", ""]
     if wrong:
         lines += ["| Case | Test | Expected | Got | Agent's reason |", "| --- | --- | --- | --- | --- |"]
         for case, runs in wrong.items():
@@ -527,17 +760,23 @@ def main():
     parser.add_argument("--jobs", type=int, default=4, help="cases run in parallel")
     parser.add_argument("--max-turns", type=int, help="override the triage turn budget from test-and-heal.yml")
     parser.add_argument("--timeout", type=int, default=1200, help="seconds before one run is stopped")
-    parser.add_argument("--cases", type=Path, default=EVAL_DIR / "cases.jsonl")
+    parser.add_argument("--cases", type=Path, default=CASES)
     parser.add_argument("--only", help="comma-separated case ids to run")
-    parser.add_argument("--out", type=Path, default=EVAL_DIR / "results", help="directory for the result file")
+    parser.add_argument("--out", type=Path, default=RESULTS, help="directory for the result file")
     parser.add_argument("--work-dir", type=Path, help="where workspaces and logs go (default: a new temp dir)")
     parser.add_argument("--keep", action="store_true", help="keep the workspaces")
+    parser.add_argument("--hide-answers", action=argparse.BooleanOptionalAction, default=None,
+                        help="delete the answer key from this checkout, .git included, before the first agent "
+                             "starts (default: on when CI is set)")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true", help="validate cases and prompt only; no agent, no API calls")
     mode.add_argument("--dry-run", action="store_true", help="build the workspaces, but don't run the agent")
     opts = parser.parse_args()
     if opts.repeats < 1 or opts.jobs < 1 or opts.timeout < 1:
         parser.error("--repeats, --jobs and --timeout must be positive")
+    if opts.work_dir and (inside(opts.work_dir, ROOT) or inside(ROOT, opts.work_dir)):
+        parser.error("--work-dir must be outside this repository: from a workspace in it, an agent could reach the "
+                     "answer key")
     if opts.engine == "opencode":
         opts.model = opts.model or os.environ.get("OPENCODE_MODEL") or "deepseek/deepseek-flash"
     else:
@@ -547,14 +786,17 @@ def main():
         step = triage_step()
         if opts.max_turns:
             step["max_turns"] = opts.max_turns
-        cases, errors = load_cases(opts.cases)
+        raw, all_cases, errors = read_cases(opts.cases)
+        errors = [f"{opts.cases.name}: {error}" for error in errors]
+        cases = all_cases
         if opts.only:
             wanted = {part.strip() for part in opts.only.split(",") if part.strip()}
             unknown = wanted - {case["id"] for case in cases}
             errors += [f"--only: no case {name!r}" for name in sorted(unknown)]
             cases = [case for case in cases if case["id"] in wanted]
+        errors += workspace_leaks(all_cases)
         for error in errors:
-            say(f"run-eval: {opts.cases.name}: {error}", sys.stderr)
+            say(f"run-eval: {error}", sys.stderr)
         if errors:
             return 1
         for warning in fixture_warnings(cases):
@@ -563,21 +805,39 @@ def main():
         if opts.check:
             say(f"run-eval: {len(cases)} cases OK ({', '.join(f'{n} {label}' for label, n in labels.most_common())}); "
                 f"prompt and {step['max_turns']}-turn budget read from {WORKFLOW.name}.")
+            say("run-eval: no file that goes into a workspace gives an answer away. With --hide-answers (the default "
+                "when CI is set) these are deleted before the first agent starts:\n"
+                + listing(answer_files(all_cases, opts.cases)))
             return 0
 
+        hide = not opts.dry_run and (ci_is_set() if opts.hide_answers is None else opts.hide_answers)
+        facts = {  # read now, while .git is there
+            "platform_commit": git_info("rev-parse", "HEAD"),
+            "triage_md": {"path": TRIAGE_AGENT, "blob": git_info("hash-object", TRIAGE_AGENT),
+                          "commit": git_info("log", "-1", "--format=%H", "--", TRIAGE_AGENT),
+                          "modified": bool(git_info("status", "--porcelain", "--", TRIAGE_AGENT))},
+            "agent_rules_blob": git_info("hash-object", "AGENT-RULES.md"),
+            "cases": {"file": relative(opts.cases), "count": len(cases), "sha256": hashlib.sha256(raw).hexdigest()},
+        }
         version = "" if opts.dry_run else engine_version(opts.engine)
-        work_dir = opts.work_dir or Path(tempfile.mkdtemp(prefix="triage-eval-"))
+        work_dir = (opts.work_dir or Path(tempfile.mkdtemp(prefix="triage-eval-"))).resolve()
         (work_dir / "workspaces").mkdir(parents=True, exist_ok=True)
         (work_dir / "logs").mkdir(parents=True, exist_ok=True)
+        bin_dir = None if opts.dry_run else transcript_wrapper(work_dir, opts.engine)
         repeats = 1 if opts.dry_run else opts.repeats
         jobs = [(case, repeat) for repeat in range(1, repeats + 1) for case in cases]
         if not opts.dry_run:
             warm_up_mcp()
+        hidden = {}
+        if hide:
+            hidden = hide_answers(all_cases, opts.cases)
+            say("run-eval: answer key hidden: deleted before the first agent starts:\n" + listing(hidden))
         say(f"run-eval: {len(cases)} cases {TIMES} {repeats} run(s), {opts.jobs} at a time, engine {opts.engine} "
             f"{opts.model or 'default'}; logs in {work_dir / 'logs'}")
         trials, done = [], 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=opts.jobs) as pool:
-            futures = {pool.submit(run_trial, case, repeat, opts, step, work_dir): (case, repeat) for case, repeat in jobs}
+            futures = {pool.submit(run_trial, case, repeat, opts, step, work_dir, bin_dir, all_cases): (case, repeat)
+                       for case, repeat in jobs}
             for future in concurrent.futures.as_completed(futures):
                 case, repeat = futures[future]
                 try:
@@ -587,10 +847,15 @@ def main():
                     raise
                 done += 1
                 trials.append(trial)
-                outcome = "workspace OK" if opts.dry_run else (
-                    f"expected {trial['expected']}, got {trial['got']}"
-                    + ("" if trial["got"] == trial["expected"] else "  <- wrong")
-                    + (f" ({trial['error']})" if trial["error"] else ""))
+                if opts.dry_run:
+                    outcome = "workspace OK"
+                elif hide:  # no labels in the job's log, which is on this machine, while other agents still run
+                    outcome = f"got {trial['got']}"
+                else:
+                    outcome = (f"expected {trial['expected']}, got {trial['got']}"
+                               + ("" if trial["got"] == trial["expected"] else "  <- wrong"))
+                outcome += (f" ({trial['error']})" if trial["error"] else "") + (
+                    f"  INVALID: {trial['invalid']}" if trial["invalid"] else "")
                 say(f"[{done}/{len(jobs)}] {case['id']} run {repeat}: {outcome} ({trial['seconds']}s)")
         if opts.dry_run:
             say(f"run-eval: dry run OK: {len(trials)} workspaces built, each with exactly its failure in "
@@ -603,7 +868,6 @@ def main():
     order = {case["id"]: n for n, case in enumerate(cases)}
     trials.sort(key=lambda t: (order[t["case"]], t["repeat"]))
     today = datetime.datetime.now(datetime.timezone.utc)
-    blob = git_info("hash-object", TRIAGE_AGENT)
     meta = {
         "date": today.strftime("%Y-%m-%d"),
         "finished_at": today.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -613,12 +877,8 @@ def main():
         "repeats": opts.repeats,
         "max_turns": step["max_turns"],
         "prompt": step["prompt"],
-        "platform_commit": git_info("rev-parse", "HEAD"),
-        "triage_md": {"path": TRIAGE_AGENT, "blob": blob, "commit": git_info("log", "-1", "--format=%H", "--", TRIAGE_AGENT),
-                      "modified": bool(git_info("status", "--porcelain", "--", TRIAGE_AGENT))},
-        "agent_rules_blob": git_info("hash-object", "AGENT-RULES.md"),
-        "cases": {"file": relative(opts.cases), "count": len(cases),
-                  "sha256": hashlib.sha256(opts.cases.read_bytes()).hexdigest()},
+        **facts,
+        "deleted_before_agents": [relative(path) for path in hidden],
     }
     summary = score(trials, opts.repeats)
     out = results_path(opts.out, meta["date"], opts.engine, meta["model"])

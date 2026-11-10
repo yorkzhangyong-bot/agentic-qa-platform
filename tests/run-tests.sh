@@ -24,9 +24,13 @@
 #                    must fail naming those lines and load nothing. No value may be printed outside ::add-mask::.
 #                    Also: CRLF, empty values, % in masks, -- COMMAND, --check, and a guard that no agent step and
 #                    no job-wide env in the workflows gets APP_ENV.
-#   evals/triage/run-eval.py  --check accepts evals/triage/cases.jsonl and rejects a bad label; a run with a stub
-#                    engine (every failure SELECTOR_DRIFT, 3 cases x 2 runs) must report the expected scores, the CI
-#                    prompt and the result-file metadata. No model API is called.
+#   evals/triage/run-eval.py  --check accepts evals/triage/cases.jsonl and lists what hide mode deletes; it rejects
+#                    a bad label and a workspace file that gives an answer away. Runs with a stub engine (every
+#                    failure SELECTOR_DRIFT, 3 cases x 2 runs) must report the expected scores, the CI prompt, the
+#                    result-file metadata and the engine's full-transcript flags (claude and opencode); a run whose
+#                    log quotes the answer key is invalid. Hide mode (CI set) runs on a scratch clone: it must delete
+#                    the answer key, .git included, before the stub agent looks for it, report that agent's run as
+#                    invalid and unscored, and refuse to delete a .git with uncommitted work. No model API is called.
 #
 # Usage: bash tests/run-tests.sh          (exit code 0 when every check passes)
 set -euo pipefail
@@ -641,7 +645,10 @@ set +e
 (cd "$root" && python3 evals/triage/run-eval.py --check > "$work/eval-check.log" 2>&1)
 code=$?
 set -e
-check_texts eval-cases-are-valid "$work/eval-check.log" "+cases OK" "-warning"
+# The stub cases below reuse three real test names with their labels, so hide mode deletes this file too.
+check_texts eval-cases-are-valid "$work/eval-check.log" "+cases OK" "-warning" \
+  "+no file that goes into a workspace gives an answer away" "+  evals/triage/cases.jsonl  (the cases)" \
+  "+  tests/run-tests.sh  (T01: its test name near a label" "+  .git  ("
 printf '%s\n' '{"id": "x", "file": "tests/x.spec.ts", "name": "n", "error": "e", "expected": "BUG", "why": "w"}' \
   > "$work/eval-bad.jsonl"
 set +e
@@ -653,14 +660,39 @@ if [ "$code" -eq 1 ] && grep -qF "expected must be one of" "$work/eval-bad.log";
 else
   bad "eval-rejects-a-bad-label" "exit $code"$'\n'"$(cat "$work/eval-bad.log")"
 fi
-# End to end with a stub engine that calls every failure SELECTOR_DRIFT: 3 cases x 2 runs.
+# No file that goes into every workspace may give an answer away: here a case's "why" is a line of AGENT-RULES.md.
+python3 - "$root/AGENT-RULES.md" > "$work/eval-leaky.jsonl" <<'PY'
+import json
+import sys
+
+why = next(line.strip() for line in open(sys.argv[1], encoding="utf-8")
+           if len(line.strip()) > 40 and not line.startswith("#"))
+print(json.dumps({"id": "leaky", "file": "tests/e2e-browser/app.spec.ts", "name": "home page loads",
+                  "error": "page.goto: net::ERR_CONNECTION_REFUSED", "expected": "ENV", "why": why}))
+PY
+set +e
+(cd "$root" && python3 evals/triage/run-eval.py --check --cases "$work/eval-leaky.jsonl" > "$work/eval-leaky.log" 2>&1)
+code=$?
+set -e
+if [ "$code" -eq 1 ] && grep -qF "AGENT-RULES.md gives away leaky's answer (its why)" "$work/eval-leaky.log"; then
+  ok "eval-refuses-a-leaky-workspace"
+else
+  bad "eval-refuses-a-leaky-workspace" "exit $code"$'\n'"$(cat "$work/eval-leaky.log")"
+fi
+# End to end with a stub engine that calls every failure SELECTOR_DRIFT: 3 cases x 2 runs. CI is unset, so the answer
+# key stays; hide mode, which would delete parts of this checkout, is tested on a scratch clone further down.
 eval_bin="$work/eval-bin"
 mkdir -p "$eval_bin"
 cat > "$eval_bin/claude" <<'STUB'
 #!/usr/bin/env bash
-# Stub engine for the triage eval: records its arguments and calls every failure SELECTOR_DRIFT.
+# Stub engine for the triage eval, as claude and as opencode: records its arguments and calls every failure
+# SELECTOR_DRIFT. In the workspace whose failure is the test $EVAL_STUB_PEEK_ON, it first runs cat $EVAL_STUB_PEEK,
+# as an agent hunting for the answer key would.
 if [ "${1:-}" = --version ]; then echo "9.9.9 (Claude Code)"; exit 0; fi
 printf '%s\n' "$@" >> "$EVAL_STUB_ARGS"
+if [ -n "${EVAL_STUB_PEEK:-}" ] && grep -qF "$EVAL_STUB_PEEK_ON" results/failures.json; then
+  cat "$EVAL_STUB_PEEK"
+fi
 python3 - "$EXPECTED_OUTPUT" <<'PY'
 import json
 import sys
@@ -672,33 +704,116 @@ json.dump({"framework": "playwright", "items": items}, open(sys.argv[1], "w", en
 PY
 STUB
 chmod +x "$eval_bin/claude"
+cp "$eval_bin/claude" "$eval_bin/opencode"
 cat > "$work/eval-cases.jsonl" <<'JSONL'
 {"id": "drift", "file": "tests/e2e-browser/login.spec.ts", "name": "logs in with valid credentials", "error": "locator.click: Timeout 10000ms exceeded. waiting for getByTestId('login-btn').", "expected": "SELECTOR_DRIFT", "why": "never-shown-to-the-agent"}
 {"id": "bug", "file": "tests/e2e-browser/checkout.spec.ts", "name": "shows correct total", "error": "expect(received).toBe(expected) Expected: \"$30.00\" Received: \"$300.00\".", "expected": "REAL_BUG", "why": "never-shown-to-the-agent"}
 {"id": "env", "file": "tests/e2e-browser/app.spec.ts", "name": "home page loads", "error": "page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:8501/", "expected": "ENV", "why": "never-shown-to-the-agent"}
 JSONL
 set +e
-(cd "$root" && env PATH="$eval_bin:$PATH" EVAL_STUB_ARGS="$work/eval-args.txt" SKIP_MCP_WARMUP=1 \
+(cd "$root" && env -u CI PATH="$eval_bin:$PATH" EVAL_STUB_ARGS="$work/eval-args.txt" SKIP_MCP_WARMUP=1 \
   GITHUB_STEP_SUMMARY="$work/eval-summary.md" python3 evals/triage/run-eval.py --engine claude \
   --cases "$work/eval-cases.jsonl" --repeats 2 --jobs 1 --out "$work/eval-results" --work-dir "$work/eval-run" --keep \
   > "$work/eval.log" 2>&1)
 code=$?
 set -e
-{ cat "$work/eval-summary.md" "$work/eval-results/$(date -u +%Y-%m-%d)-claude-default.json" "$work/eval-args.txt" \
-    "$work/eval.log"; } > "$work/eval-transcript" 2> /dev/null || true
+{ cat "$work/eval-summary.md" "$work"/eval-results/*.json "$work/eval-args.txt" "$work/eval.log"; } \
+  > "$work/eval-transcript" 2> /dev/null || true
 check_texts eval-run-with-stub-engine "$work/eval-transcript" \
-  "+**Accuracy** 2/6 (33%)" "+**Critical: REAL_BUG classified as SELECTOR_DRIFT** 2" \
+  "+**Accuracy** 2/6 (33%)" "+**Critical: REAL_BUG classified as SELECTOR_DRIFT** 2" "+**Invalid runs** 0" \
   "+3/3 cases gave the same answer in all 2 runs" "+| REAL_BUG | 2 | 0 | 0 | 0 | 0 |" \
   "+| SELECTOR_DRIFT | 2/2 (100%) |" "+| bug | shows correct total | REAL_BUG | SELECTOR_DRIFT " "+stub verdict" \
-  "-| drift |" "+\"engine_version\": \"9.9.9 (Claude Code)\"" "+\"model\": \"default\"" \
-  "+\"blob\": \"$(git -C "$root" hash-object agents/common/triage.md)\"" \
-  "+Triage every failure in results/failures.json" "+App URL: not provided." "+--max-turns"
+  "-| drift |" "-### Invalid runs" "+\"engine_version\": \"9.9.9 (Claude Code)\"" "+\"model\": \"default\"" \
+  "+\"blob\": \"$(git -C "$root" hash-object agents/common/triage.md)\"" "+\"deleted_before_agents\": []" \
+  "+Triage every failure in results/failures.json" "+App URL: not provided." "+--max-turns" "+stream-json" \
+  "+drift run 1: expected SELECTOR_DRIFT, got SELECTOR_DRIFT"
 # The answer must never reach the agent: no workspace may contain a case's "why".
 kept="$(find "$work/eval-run/workspaces" -mindepth 1 -maxdepth 1 -type d | wc -l)"
 if [ "$kept" -eq 6 ] && ! grep -rqF "never-shown-to-the-agent" "$work/eval-run/workspaces"; then
   ok "eval-workspaces-hide-the-answer"
 else
   bad "eval-workspaces-hide-the-answer" "$kept workspaces kept; the why text is in:"$'\n'"$(grep -rlF never-shown-to-the-agent "$work/eval-run/workspaces" | head -n 3)"
+fi
+# OpenCode's transcript, its JSON event stream, goes to the log too. Here the stub agent reads a copy of the answer
+# key under another name: its run is invalid because the log quotes a case's "why".
+cp "$work/eval-cases.jsonl" "$work/key-copy.txt"
+set +e
+(cd "$root" && env -u CI PATH="$eval_bin:$PATH" EVAL_STUB_ARGS="$work/eval-oc-args.txt" \
+  EVAL_STUB_PEEK="$work/key-copy.txt" EVAL_STUB_PEEK_ON="logs in with valid credentials" SKIP_MCP_WARMUP=1 \
+  GITHUB_STEP_SUMMARY="$work/eval-oc-summary.md" python3 evals/triage/run-eval.py --engine opencode \
+  --cases "$work/eval-cases.jsonl" --only drift --jobs 1 --out "$work/eval-oc-results" --work-dir "$work/eval-oc-run" \
+  > "$work/eval-oc.log" 2>&1)
+code=$?
+set -e
+{ cat "$work/eval-oc-summary.md" "$work/eval-oc-args.txt" "$work/eval-oc.log"; } > "$work/eval-oc-transcript" \
+  2> /dev/null || true
+check_texts eval-opencode-transcript "$work/eval-oc-transcript" "+deepseek/deepseek-flash" "+--format" \
+  "-stream-json" "+**Accuracy** 0/0" "+**Invalid runs** 1 (not scored)" \
+  "+the log quotes the answer key (the why of drift, bug and env)"
+
+# Hide mode, the default when CI is set, on a scratch clone of this repository whose answer key is the stub cases,
+# plus an old result file and a note that quotes a case's "why". In the env case the stub agent tries to read the
+# answer key: it must be gone by then, and that run must be reported as invalid and not scored.
+hide_src="$work/hide-src"
+mkdir -p "$hide_src"
+cp -R "$root/." "$hide_src/"
+rm -rf "$hide_src/.git"
+cp "$work/eval-cases.jsonl" "$hide_src/evals/triage/cases.jsonl"
+mkdir -p "$hide_src/evals/triage/results"
+printf '%s\n' '{"trials": [' '  {"case": "bug",' '   "test": "shows correct total",' '   "expected": "REAL_BUG"}]}' \
+  > "$hide_src/evals/triage/results/old-run.json"
+echo "Remember: never-shown-to-the-agent" > "$hide_src/notes.txt"
+git -C "$hide_src" -c init.defaultBranch=main init -q
+git -C "$hide_src" -c core.autocrlf=false add -A
+git -C "$hide_src" -c core.autocrlf=false -c user.name=ci -c user.email=ci@example.com -c commit.gpgsign=false \
+  commit -qm "scratch copy" --no-verify
+git -c core.autocrlf=false clone -q "$hide_src" "$work/hide-repo"
+git -c core.autocrlf=false clone -q "$hide_src" "$work/guard-repo"
+set +e
+(cd "$work/hide-repo" && env CI=true PATH="$eval_bin:$PATH" EVAL_STUB_ARGS="$work/hide-args.txt" \
+  EVAL_STUB_PEEK="$work/hide-repo/evals/triage/cases.jsonl" EVAL_STUB_PEEK_ON="home page loads" SKIP_MCP_WARMUP=1 \
+  GITHUB_STEP_SUMMARY="$work/hide-summary.md" python3 evals/triage/run-eval.py --engine claude --jobs 1 \
+  --out "$work/hide-results" --work-dir "$work/hide-run" > "$work/hide.log" 2>&1)
+code=$?
+set -e
+{ cat "$work/hide-summary.md" "$work"/hide-results/*.json "$work/hide.log" "$work/hide-run/logs/env-r1.log"; } \
+  > "$work/hide-transcript" 2> /dev/null || true
+check_texts eval-hide-answers-in-ci "$work/hide-transcript" \
+  "+  evals/triage/cases.jsonl  (the cases)" "+  evals/triage/results/old-run.json  (a result file" \
+  "+  notes.txt  (drift: its why" "+  tests/run-tests.sh  (drift: its why" "+  .git  (" \
+  "+Answer key deleted from the checkout before the first agent started" \
+  "+drift run 1: got SELECTOR_DRIFT" "-run 1: expected" "+No such file or directory" "-never-shown-to-the-agent" \
+  "+**Accuracy** 1/2 (50%)" "+**Critical: REAL_BUG classified as SELECTOR_DRIFT** 1" "+**Invalid runs** 1 (not scored)" \
+  "+### Invalid runs (1 of 3)" "+| env | 1 | SELECTOR_DRIFT | the log mentions cases.jsonl" \
+  "+\"invalid\": 1," "+\"scored\": 2," "+\"invalid\": \"the log mentions cases.jsonl"
+present=""
+missing=""
+for f in evals/triage/cases.jsonl evals/triage/results/old-run.json notes.txt tests/run-tests.sh .git; do
+  if [ -e "$work/hide-repo/$f" ]; then present+=" $f"; fi
+done
+for f in evals/triage/project/package.json evals/triage/run-eval.py evals/README.md agents/common/triage.md \
+  AGENT-RULES.md README.md; do
+  if [ ! -e "$work/hide-repo/$f" ]; then missing+=" $f"; fi
+done
+if [ "$code" -eq 0 ] && [ -z "$present$missing" ]; then
+  ok "eval-hide-answers-deletes-the-key"
+else
+  bad "eval-hide-answers-deletes-the-key" "exit $code; still there:${present:- none}; deleted by mistake:${missing:- none}"
+fi
+# Except in a GitHub Actions job's own checkout, hide mode must not delete a .git that holds work on no remote.
+echo "work in progress" > "$work/guard-repo/wip.txt"
+set +e
+(cd "$work/guard-repo" && env CI=true PATH="$eval_bin:$PATH" EVAL_STUB_ARGS="$work/guard-args.txt" SKIP_MCP_WARMUP=1 \
+  GITHUB_STEP_SUMMARY="$work/guard-summary.md" python3 evals/triage/run-eval.py --engine claude --jobs 1 \
+  --out "$work/guard-results" --work-dir "$work/guard-run" > "$work/guard.log" 2>&1)
+code=$?
+set -e
+if [ "$code" -eq 1 ] && grep -qF "would delete .git, which holds uncommitted changes" "$work/guard.log" \
+  && [ -e "$work/guard-repo/.git" ] && [ -e "$work/guard-repo/evals/triage/cases.jsonl" ] \
+  && [ -e "$work/guard-repo/tests/run-tests.sh" ] && [ ! -e "$work/guard-args.txt" ]; then
+  ok "eval-hide-answers-keeps-local-work"
+else
+  bad "eval-hide-answers-keeps-local-work" "exit $code"$'\n'"$(cat "$work/guard.log")"
 fi
 
 echo

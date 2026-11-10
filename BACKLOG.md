@@ -8,6 +8,7 @@
 - [ ] Small prompt rules borrowed from official Playwright agents (regex for dynamic data, no networkidle/waitForLoadState/page.evaluate, comment per plan step, expected result per plan step)
 - [ ] Prototype playwright-test MCP test_debug for healer and triage (branch only, merge only if evals improve)
 - [ ] Plan-review gate and spec review agent
+- [ ] Upload Playwright test-results/**/error-context.md with the test artifact and give it to triage (and healer); update the triage eval to include matching snapshots at the same time
 - [ ] Later: weekly metrics report, flaky quarantine, test data handling, impact analysis, version tags, pytest framework, port bash scripts to Python
 
 ## Evaluation of the platform
