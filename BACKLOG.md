@@ -25,6 +25,7 @@
 - [ ] Grouped eval cases: show several failures from the same run together, as triage sees them in CI, so cross-test clues (like "no attacker key") are available.
 - [ ] After each eval run, append its row to the Results history table (by hand for now; automate later).
 - [ ] Weighted error score in the triage eval: count REAL_BUG→FLAKY as critical too, alongside REAL_BUG→SELECTOR_DRIFT, because both hide a real bug; add a weighted score to the report in which these misses cost far more than the reverse (e.g. FLAKY→REAL_BUG), and keep the plain accuracy
+- [ ] Skipped-test cases in the triage eval: today only failed tests reach triage. Add cases where tests are skipped (e.g. because seed data is missing) and check that triage's reasons match the runner's real skip count and skip reasons; a confident wrong explanation counts as a miss
 
 ### Benchmark repo (separate consumer repo)
 - [ ] Small app + spec with FR/SC ids
