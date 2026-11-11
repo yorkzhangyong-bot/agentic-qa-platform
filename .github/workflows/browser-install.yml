@@ -1,0 +1,104 @@
+name: browser-install
+
+# The Playwright browser install while apt is down, on a real runner: every apt download goes through a proxy on a
+# closed port, as when the Ubuntu mirrors can't be resolved. scripts/install-browsers.sh must retry apt, install
+# Chromium without its system packages, launch it and pass with a warning. With a library Chromium needs removed, it
+# must fail with the error that names apt, not the tests, as the cause.
+# Runs when the install scripts, the framework configs or the workflows change, and on demand.
+
+on:
+  pull_request:
+    paths:
+      - scripts/install-browsers.sh
+      - scripts/install-deps.sh
+      - frameworks/*.json
+      - .github/workflows/**
+  push:
+    branches: [main]
+    paths:
+      - scripts/install-browsers.sh
+      - scripts/install-deps.sh
+      - frameworks/*.json
+      - .github/workflows/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  apt-down:
+    name: Browser install with apt down
+    runs-on: ubuntu-latest
+    env:
+      FRAMEWORK: playwright
+      BROWSERS: chromium
+      INSTALL_RETRY_DELAYS: "2 2"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      - name: Install the probe project
+        working-directory: tests/locator-probe/project
+        run: npm install --no-audit --no-fund --loglevel=error
+
+      - name: Break apt
+        run: |
+          # Every apt download goes through a proxy on a closed port, so each one fails at once.
+          printf 'Acquire::http::Proxy "http://127.0.0.1:9";\nAcquire::https::Proxy "http://127.0.0.1:9";\n' \
+            | sudo tee /etc/apt/apt.conf.d/99-unreachable-for-test > /dev/null
+          # fonts-freefont-ttf is one of the packages --with-deps installs for Chromium, which starts without it.
+          # Removed, it gives apt something to download, so the install fails as in a real outage.
+          if dpkg -s fonts-freefont-ttf > /dev/null 2>&1; then sudo dpkg --remove --force-depends fonts-freefont-ttf; fi
+
+      - name: Install Chromium with apt down
+        working-directory: tests/locator-probe/project
+        run: |
+          set +e
+          bash "$GITHUB_WORKSPACE/scripts/install-browsers.sh" install > "$RUNNER_TEMP/apt-down.log" 2>&1
+          code=$?
+          set -e
+          # The script's ::warning:: is the expected result here: print its output with workflow commands off.
+          token="$(openssl rand -hex 16)"
+          echo "::stop-commands::$token"
+          cat "$RUNNER_TEMP/apt-down.log"
+          echo "::$token::"
+          fail() { echo "::error::$1"; exit 1; }
+          [ "$code" -eq 0 ] || fail "install-browsers.sh exited $code. Chromium launches without its system packages, so it must go on."
+          grep -q "attempt 2 of 3 failed" "$RUNNER_TEMP/apt-down.log" \
+            || fail "apt didn't fail three times, so this shows nothing. Did apt have nothing to download?"
+          grep -q "installed without the system packages" "$RUNNER_TEMP/apt-down.log" \
+            || fail "no warning about the missing system packages"
+          grep -qx "install-browsers: chromium launches." "$RUNNER_TEMP/apt-down.log" || fail "Chromium didn't launch"
+          echo "ok: apt failed 3 times; Chromium was installed without its system packages and launches."
+
+      - name: Chromium without a library it needs
+        working-directory: tests/locator-probe/project
+        run: |
+          # Chromium can't start without libnss3, and with apt down it can't come back.
+          dpkg -s libnss3 > /dev/null 2>&1 || { echo "::error::libnss3 isn't installed, so this shows nothing."; exit 1; }
+          sudo dpkg --remove --force-depends libnss3
+          set +e
+          bash "$GITHUB_WORKSPACE/scripts/install-browsers.sh" install > "$RUNNER_TEMP/no-nss.log" 2>&1
+          code=$?
+          set -e
+          # The script's ::error:: is the expected result here: print its output with workflow commands off.
+          token="$(openssl rand -hex 16)"
+          echo "::stop-commands::$token"
+          cat "$RUNNER_TEMP/no-nss.log"
+          echo "::$token::"
+          fail() { echo "::error::$1"; exit 1; }
+          [ "$code" -eq 1 ] || fail "install-browsers.sh exited $code. Chromium can't launch, so it must fail."
+          grep -qF "chromium can't launch: its system packages couldn't be installed (apt-get failed 3 times). This is an apt or network problem on the runner, not a test failure; re-run the job." \
+            "$RUNNER_TEMP/no-nss.log" || fail "the error doesn't say that apt is the cause"
+          echo "ok: Chromium can't launch, and the error names apt as the cause."

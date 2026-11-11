@@ -11,7 +11,8 @@
 #      that became a link), and the pull request must be a draft.
 #
 # Needs network access: npm installs @playwright/test (package.json) and Playwright downloads Chromium, with its
-# system dependencies when CI is set. ci.yml runs it; locally: bash tests/locator-probe/run.sh
+# system dependencies when CI is set (scripts/install-browsers.sh, which retries apt and can go on without them).
+# ci.yml runs it; locally: bash tests/locator-probe/run.sh
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,8 +35,8 @@ cp -R "$here/project/tests/." "$repo/tests/"
 cp -R "$here/failing" "$check/before"
 
 (cd "$repo" && npm install --no-audit --no-fund --loglevel=error)
-if [ -n "${CI:-}" ]; then
-  (cd "$repo" && npx playwright install --with-deps chromium)
+if [ -n "${CI:-}" ]; then  # with the system packages, retried; Chromium must launch (scripts/install-browsers.sh)
+  (cd "$repo" && FRAMEWORK=playwright BROWSERS=chromium PLATFORM_DIR="$root" bash "$root/scripts/install-browsers.sh" install)
 else
   (cd "$repo" && npx playwright install chromium)
 fi

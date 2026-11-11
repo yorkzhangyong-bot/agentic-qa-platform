@@ -3,7 +3,8 @@
 ## Platform backlog
 - [ ] Verdict job: fail the run on REAL_BUG, ENV, unhealed drift (optional fail_on_flaky)
 - [ ] Requirement coverage report: FR/SC ids in test names vs spec
-- [ ] Cache installs (node_modules, Playwright browsers) in jobs
+- [x] Cache the Playwright browsers in jobs (keyed on OS, architecture and the exact Playwright version), with apt retried and a launch check when apt stays down
+- [ ] Cache node_modules in jobs
 - [ ] Shorter PR descriptions from the pr-writer
 - [ ] Small prompt rules borrowed from official Playwright agents (regex for dynamic data, no networkidle/waitForLoadState/page.evaluate, comment per plan step, expected result per plan step)
 - [ ] Prototype playwright-test MCP test_debug for healer and triage (branch only, merge only if evals improve)

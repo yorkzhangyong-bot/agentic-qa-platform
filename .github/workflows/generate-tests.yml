@@ -52,6 +52,10 @@ on:
         description: Java version (installed when the framework runs Maven or Gradle).
         type: string
         default: "17"
+      playwright_browsers:
+        description: Playwright browsers to install, space-separated (chromium, firefox, webkit). Empty uses the framework config's list (chromium). Ignored for Cypress and Selenium.
+        type: string
+        default: ""
       plan_max_turns:
         description: Turn budget for the planner agent (claude --max-turns; emulated with a time limit on opencode).
         type: number
@@ -233,16 +237,45 @@ jobs:
           java-version: ${{ inputs.java_version }}
           cache: ${{ hashFiles('pom.xml') != '' && 'maven' || '' }}
 
+      # Each install command is retried if it fails (scripts/install-deps.sh).
       - name: Install dependencies
         env:
           INSTALL_SCRIPT: ${{ needs.config.outputs.install_script }}
-        run: |
-          while IFS= read -r cmd; do
-            [ -n "$cmd" ] || continue
-            echo "::group::$cmd"
-            bash -c "$cmd" < /dev/null
-            echo "::endgroup::"
-          done <<< "$INSTALL_SCRIPT"
+        run: bash "$PLATFORM_DIR/scripts/install-deps.sh"
+
+      # Playwright only: the browsers the tests need (chromium, unless the playwright_browsers input says
+      # otherwise), cached per Playwright version. scripts/install-browsers.sh retries a failing apt and, if it
+      # keeps failing, goes on without the system packages as long as the browsers launch.
+      - name: Playwright browsers cache key
+        id: browsers
+        if: needs.config.outputs.playwright_browsers != ''
+        env:
+          FRAMEWORK: ${{ inputs.framework }}
+          BROWSERS: ${{ inputs.playwright_browsers || needs.config.outputs.playwright_browsers }}
+        run: bash "$PLATFORM_DIR/scripts/install-browsers.sh" key
+
+      - name: Restore the Playwright browsers
+        id: browser-cache
+        if: steps.browsers.outputs.key != ''
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ steps.browsers.outputs.key }}
+
+      - name: Install the Playwright browsers
+        if: needs.config.outputs.playwright_browsers != ''
+        env:
+          FRAMEWORK: ${{ inputs.framework }}
+          BROWSERS: ${{ inputs.playwright_browsers || needs.config.outputs.playwright_browsers }}
+        run: bash "$PLATFORM_DIR/scripts/install-browsers.sh" install
+
+      # Right after the install, so the browsers are cached even when the tests fail later.
+      - name: Save the Playwright browsers
+        if: steps.browsers.outputs.key != '' && steps.browser-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ steps.browsers.outputs.key }}
 
       - name: Fetch spec
         id: spec

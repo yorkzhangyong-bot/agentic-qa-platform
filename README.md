@@ -78,7 +78,8 @@ test-and-heal.yml
                                                └──(REAL_BUG)────────► report-defects
 
   config          _select-framework.yml validates the engine and reads frameworks/<framework>.json
-  test            check out the commit, install, load-app-env.sh, run tests, write-summary.sh, upload "test-results"
+  test            check out the commit, install-deps.sh, install-browsers.sh (Playwright), load-app-env.sh, run tests,
+                  write-summary.sh, upload "test-results"
   triage          check out the same commit, parse-report.sh → results/failures.json, stage-agents.sh,
                   run-agent.sh triage → results/triage.json, check-triage.sh (fails without a usable result),
                   write-summary.sh (with the classifications), upload "triage"
@@ -97,6 +98,9 @@ generate-tests.yml
                        run-agent.sh pr-writer → PR auto-generate/<run_id>
 ```
 
+- **`scripts/install-deps.sh`** and **`scripts/install-browsers.sh`** install the framework and, for Playwright,
+  the browsers the tests need. They retry a failing registry or apt mirror instead of failing the run; see
+  [Installs and browsers](#installs-and-browsers).
 - **`scripts/stage-agents.sh`** writes the agents, the shared rules ([`AGENT-RULES.md`](AGENT-RULES.md)),
   permissions and MCP config in the format of the selected engine.
 - **`scripts/run-agent.sh`** runs one agent non-interactively with its own turn budget. It fails if the agent
@@ -186,6 +190,8 @@ OpenCode's known gaps:
 │   ├── locator-check.sh         healed locators: same role and accessible name as before? (no AI)
 │   ├── locator-probe/           playwright.cjs: records the healed locators' elements in the verification run
 │   ├── report-defects.sh        REAL_BUG failures → fingerprinted candidates → GitHub issues (no AI)
+│   ├── install-deps.sh          the framework's install commands, each retried when it fails
+│   ├── install-browsers.sh      Playwright browsers: apt retried, a launch check, the cache key
 │   └── load-app-env.sh          APP_ENV secret → the test runs' environment, never an agent's
 ├── tests/                       fixture tests for the scripts (bash tests/run-tests.sh)
 │   ├── anti-cheat/              base/ sample project + *.diff fixtures (pass-* and fail-*)
@@ -203,6 +209,7 @@ OpenCode's known gaps:
 │   ├── test-and-heal.yml        reusable: test → triage → heal → PR, and report-defects → issues
 │   ├── generate-tests.yml       reusable: spec → plan → tests → PR
 │   ├── eval-triage.yml          manual: offline evaluation of the triage agent
+│   ├── browser-install.yml      the browser install with apt down, on a real runner (when the install changes)
 │   └── ci.yml                   CI for this repository
 └── templates/                   caller workflows for consumer repos
     ├── caller-test-and-heal.yml
@@ -264,6 +271,7 @@ OpenCode's known gaps:
 | `engine` | no | `claude` | Agent engine: `claude` or `opencode`. Anything else fails in the `config` job, before the tests run. |
 | `node_version` | no | `"20"` | Node.js version. Always installed, because the engines and the MCP server need it. |
 | `java_version` | no | `"17"` | Java version. Installed when the framework runs Maven or Gradle. |
+| `playwright_browsers` | no | `""` | Playwright browsers to install, space-separated (`chromium`, `firefox`, `webkit`). Empty uses the framework config's `chromium`; set it if your Playwright config also runs Firefox or WebKit. Ignored for Cypress and Selenium. See [Installs and browsers](#installs-and-browsers). |
 | `triage_max_turns` | no | `15` | Turn budget for the triage agent. Exact on claude; emulated on opencode. |
 | `heal_max_turns` | no | `40` | Turn budget for the healer agent. Exact on claude; emulated on opencode. |
 | `defect_max_turns` | no | `20` | Turn budget for the defect-reporter agent. Exact on claude; emulated on opencode. |
@@ -353,6 +361,7 @@ How it runs:
 | `jira_email` | no | `""` | Jira Cloud account email, for basic auth with `JIRA_TOKEN`. If empty, the token is sent as a Bearer token (Jira Data Center PAT). |
 | `node_version` | no | `"20"` | Node.js version. |
 | `java_version` | no | `"17"` | Java version (Maven/Gradle frameworks). |
+| `playwright_browsers` | no | `""` | Playwright browsers to install, as in `test-and-heal.yml`. |
 | `plan_max_turns` | no | `20` | Turn budget for the planner agent. |
 | `generate_max_turns` | no | `80` | Turn budget for the generator agent. |
 | `claude_code_version` | no | `"2.1.283"` | Version of `@anthropic-ai/claude-code` (engine `claude`). |
@@ -384,7 +393,35 @@ compact JSON. It also outputs these derived values:
 - `forbidden_paths_csv`: the forbidden paths, comma-separated.
 - `runtime`: `java` if the commands use Maven or Gradle, otherwise `node`.
 - `error_context_glob`: the optional key's value, or empty if the config has none.
+- `playwright_browsers`: the optional key's browsers, space-separated, or empty if the config has none.
 - `engine`: the validated engine.
+
+### Installs and browsers
+
+A registry or an apt mirror that fails for a while shouldn't fail a whole run.
+
+- **Install commands.** `scripts/install-deps.sh` runs the framework config's `install` commands. A command that
+  fails is retried 15 s and then 45 s later, 3 attempts in all, before the job fails with an error that names it.
+  This covers:
+  - `npm ci`, including the Cypress binary it downloads;
+  - Maven's dependencies for Selenium. Selenium Manager still finds the driver when the tests start.
+- **Playwright browsers.** The test, triage, heal and generate jobs install only the browsers the tests need:
+  `chromium`, unless the `playwright_browsers` input says otherwise. `scripts/install-browsers.sh` does it:
+  1. It restores `~/.cache/ms-playwright` from the Actions cache. The key holds the OS, the architecture, the
+     project's exact Playwright version and the browsers. After a fresh install, the job saves the cache right
+     away, so a test job that fails later still saves it.
+  2. It runs `npx playwright install --with-deps <browsers>`. If that fails, it waits 15 s and then 45 s, runs
+     `apt-get update`, and tries again, 3 attempts in all.
+  3. If apt still fails, it installs the browsers without their system packages. The runner image has most of
+     them.
+  4. Each browser must then launch headless.
+     - If it does, the job goes on, with a warning when the system packages are missing (missing fonts can change
+       how pages render).
+     - If it doesn't, the job fails with "… can't launch: its system packages couldn't be installed (apt-get failed
+       3 times). This is an apt or network problem on the runner, not a test failure; re-run the job."
+- **Tested on a real runner.** `.github/workflows/browser-install.yml` points apt at a closed port. Chromium must
+  then be installed without its system packages and launch. With `libnss3` removed, the job must fail with that
+  error. It runs when the install scripts, the framework configs or the workflows change, and on demand.
 
 ## App secrets (`APP_ENV`)
 
@@ -569,7 +606,8 @@ passes it:
 | Key | Meaning |
 |---|---|
 | `name` | Framework id; same as the file name. |
-| `install` | Array of commands, run in order from the repository root. |
+| `install` | Array of commands, run in order from the repository root by `install-deps.sh`, each retried when it fails. |
+| `playwright_browsers` | Optional. The Playwright browsers the tests need (`chromium`, `firefox`, `webkit`), installed after `install` by `install-browsers.sh`, with their system packages and a cache. Playwright: `["chromium"]`. The `playwright_browsers` input overrides it. |
 | `run` | Test command. Must produce JUnit XML that matches `report_glob`. |
 | `env` | Optional object of environment variables for `run`. Playwright uses it to set `PLAYWRIGHT_JUNIT_OUTPUT_NAME`. |
 | `report_glob` | Location of the JUnit XML; the input to `parse-report.sh`. |
@@ -586,6 +624,8 @@ passes it:
 1. **Config.** Create `frameworks/<name>.json` with every key above.
    - `run` must write JUnit XML matching `report_glob`. Put reporter settings in `env`.
    - If the framework needs Java, call `mvn` or `gradle` in the commands so `runtime` resolves to `java`.
+   - If the tests run in Playwright's browsers, list them in `playwright_browsers`, not as an install command, so
+     they get the cache, the apt retries and the launch check.
 2. **Agents.** Create `agents/<name>/planner.md`, `generator.md` and `healer.md`, starting from the closest
    existing framework.
    - Keep the front-matter names `planner`, `generator` and `healer`; the workflows run those agents by name.
@@ -768,7 +808,8 @@ These are **not** detected by the scripts and must be checked by the reviewer (t
 
 - `@playwright/mcp` drives the Google Chrome that GitHub-hosted Ubuntu runners include. Self-hosted runners
   need Chrome, `jq`, `python3`, GNU `timeout` (for OpenCode) and Actions Runner v2.327.1 or later (all actions
-  used, including `create-pull-request@v8`, run on Node 24).
+  used, including `create-pull-request@v8`, run on Node 24). Without passwordless `sudo` and apt, the Playwright
+  browsers are installed without their system packages and must launch as they are.
 - Pull requests opened with the default `GITHUB_TOKEN` don't trigger other workflows. Re-run CI on them
   manually, or switch the action to a GitHub App token.
 - The artifact names `test-results`, `triage`, `auto-heal-results` and `defects` are fixed, so call
@@ -788,6 +829,12 @@ These are **not** detected by the scripts and must be checked by the reviewer (t
   - `write-summary.sh`: the same sample reports, an edge-case report and a triage file must produce the markdown in
     `tests/write-summary/*.expected.md`, and missing or broken input must still exit 0;
   - `fetch-spec.sh`: the Spec Kit folder must produce `003-feature.expected.md`;
+  - `install-deps.sh` and `install-browsers.sh`, with stub `npx`, `node`, `sudo` and `sleep`:
+    - a failing command is retried 15 s and 45 s later and fails the step after 3 attempts;
+    - a failing apt gets `apt-get update` and the same retries;
+    - after 3 failures, the browsers are installed without their system packages, and the job goes on when they
+      launch and fails with the apt error when they don't;
+    - also the cache key, several browsers, other browsers refused, and nothing for Cypress;
   - `stage-agents.sh`: staging is checked for both engines, including the tools each agent may use, that an
     OpenCode agent file allows nothing, and that the rules for shell metacharacters deny on both engines (in
     OpenCode, after every allow rule);
@@ -833,6 +880,9 @@ These are **not** detected by the scripts and must be checked by the reviewer (t
   - the locator check end to end (`tests/locator-probe/run.sh`). A TypeScript Playwright project like the
     consumers' (its own fixtures, a page object, `expect` assertions) runs its healed tests in Chromium with the
     probe preloaded. The PR section must then show one match, two unknown and two mismatches.
+- `.github/workflows/browser-install.yml` runs the Playwright browser install with apt down on a real runner. It
+  runs when `scripts/install-browsers.sh`, `scripts/install-deps.sh`, `frameworks/*.json` or a workflow changes,
+  and on demand (see [Installs and browsers](#installs-and-browsers)).
 - Planned work and the plan for evaluating the platform are in [`BACKLOG.md`](BACKLOG.md).
 - [`evals/README.md`](evals/README.md) describes the offline triage eval. The manual `eval-triage.yml` workflow
   runs it; `ci.yml` only checks it, without calling a model API.

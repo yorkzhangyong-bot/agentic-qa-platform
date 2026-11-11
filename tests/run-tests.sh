@@ -12,6 +12,14 @@
 #                    checked too; every run must exit 0.
 #   fetch-spec.sh    The Spec Kit folder tests/fetch-spec/specs/003-feature must produce
 #                    tests/fetch-spec/003-feature.expected.md; an empty folder must fail; a file is copied unchanged.
+#   install-deps.sh  With a stub command that fails its first runs: each command runs once when it passes, is
+#                    retried 15 s and then 45 s later when it fails, and after 3 attempts fails the step with an
+#                    error that names it; the commands get no input.
+#   install-browsers.sh  With stub npx, node, sudo and sleep: one install with the system packages when apt works;
+#                    apt-get update and a retry 15 s and 45 s later when it fails; after 3 failures, the browsers
+#                    without their system packages, going on with a warning when they launch and failing with the
+#                    apt error when they don't. Also a launch failure after a full install, a failed download,
+#                    several browsers, nothing for Cypress, other browsers refused, no Playwright, the cache key.
 #   stage-agents.sh  Staging for claude and for opencode in a scratch repo must produce the expected files.
 #   run-agent.sh     With stub `claude` / `opencode` executables, the expected command lines must be built, and a
 #                    missing EXPECTED_OUTPUT must fail the run.
@@ -283,6 +291,146 @@ if (cd "$specs" && SPEC_PATH=specs/003-feature/spec.md SPEC_OUT=file.md bash "$r
 else
   bad "single-file-unchanged" "SPEC_PATH pointing at a file must copy it unchanged"
 fi
+
+echo
+echo "install-deps.sh, install-browsers.sh"
+istubs="$work/install-stubs"
+istate="$work/install-state"
+iproject="$work/install-project"
+mkdir -p "$istubs" "$iproject"
+# Stubs that log each call to $INSTALL_STATE/calls and never wait: npx (Playwright's CLI; the first
+# STUB_DEPS_FAILS installs with --with-deps fail as apt does when a mirror can't be resolved), node (the launch
+# check; STUB_LAUNCH_FAILS lists the browsers that don't launch), sudo, sleep, and `flaky <name> <n>`, an install
+# command that fails its first n runs.
+cat > "$istubs/npx" <<'STUB'
+#!/usr/bin/env bash
+echo "npx $*" >> "$INSTALL_STATE/calls"
+case " $* " in
+  *" --version "*)
+    [ "${STUB_VERSION_EXIT:-0}" -eq 0 ] || exit "$STUB_VERSION_EXIT"
+    echo "Version ${STUB_VERSION:-1.65.0}" ;;
+  *" install --with-deps "*)
+    n=$(( $(cat "$INSTALL_STATE/deps" 2> /dev/null || echo 0) + 1 ))
+    echo "$n" > "$INSTALL_STATE/deps"
+    if [ "$n" -le "${STUB_DEPS_FAILS:-0}" ]; then
+      echo "E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/f/fonts-freefont/fonts-freefont-ttf_all.deb  Temporary failure resolving 'archive.ubuntu.com'" >&2
+      exit 100
+    fi ;;
+  *" install "*) exit "${STUB_PLAIN_EXIT:-0}" ;;
+esac
+STUB
+cat > "$istubs/node" <<'STUB'
+#!/usr/bin/env bash
+echo "launch $3" >> "$INSTALL_STATE/calls"
+case " ${STUB_LAUNCH_FAILS:-} " in
+  *" $3 "*) echo "browserType.launch: error while loading shared libraries: libnss3.so" >&2; exit 1 ;;
+esac
+STUB
+for stub in sudo sleep; do
+  cat > "$istubs/$stub" <<'STUB'
+#!/usr/bin/env bash
+echo "$(basename "$0") $*" >> "$INSTALL_STATE/calls"
+STUB
+done
+cat > "$istubs/flaky" <<'STUB'
+#!/usr/bin/env bash
+n=$(( $(cat "$INSTALL_STATE/$1" 2> /dev/null || echo 0) + 1 ))
+echo "$n" > "$INSTALL_STATE/$1"
+echo "run $1" >> "$INSTALL_STATE/calls"
+if [ "$n" -le "$2" ]; then echo "flaky $1: failing (run $n)" >&2; exit 7; fi
+STUB
+chmod +x "$istubs"/*
+install_run() {  # install_run <script> [VAR=value]... [-- ARG...]: scripts/<script> with the stubs; sets $code
+  local script="$1" vars=() args=()
+  shift
+  while [ $# -gt 0 ] && [ "$1" != -- ]; do vars+=("$1"); shift; done
+  [ $# -eq 0 ] || { shift; args=("$@"); }
+  rm -rf "$istate"
+  mkdir -p "$istate"
+  set +e
+  (cd "$iproject" && env PATH="$istubs:$PATH" INSTALL_STATE="$istate" GITHUB_OUTPUT="$istate/output" \
+    PLATFORM_DIR="$root" ${vars[@]+"${vars[@]}"} bash "$root/scripts/$script" ${args[@]+"${args[@]}"}) \
+    > "$work/install.out" 2>&1
+  code=$?
+  set -e
+  cat "$istate/output" >> "$work/install.out" 2> /dev/null || true
+}
+install_check() {  # install_check <name> <exit> <calls, joined with ;> [+present|-absent]...: about the last install_run
+  local name="$1" want="$2" want_calls="$3" calls problems="" item
+  shift 3
+  calls=""
+  if [ -f "$istate/calls" ]; then calls="$(tr '\n' ';' < "$istate/calls")"; fi
+  calls="${calls%;}"
+  [ "$code" -eq "$want" ] || problems+="exit $code (want $want)"$'\n'
+  [ "$calls" = "$want_calls" ] || problems+="calls: $calls"$'\n'"want:  $want_calls"$'\n'
+  for item in "$@"; do
+    if grep -qF -- "${item:1}" "$work/install.out"; then
+      [ "${item:0:1}" = + ] || problems+="unexpected: ${item:1}"$'\n'
+    else
+      [ "${item:0:1}" = - ] || problems+="missing: ${item:1}"$'\n'
+    fi
+  done
+  if [ -z "$problems" ]; then ok "$name"; else bad "$name" "$problems$(cat "$work/install.out")"; fi
+}
+install_run install-deps.sh "INSTALL_SCRIPT=flaky a 0"$'\n'"flaky b 0"
+install_check install-deps-runs-each-command 0 "run a;run b" "-::warning" "-::error"
+install_run install-deps.sh "INSTALL_SCRIPT=flaky a 2"$'\n'"flaky b 0"
+install_check install-deps-retries-a-failing-command 0 "run a;sleep 15;run a;sleep 45;run a;run b" \
+  "+::warning title=Install::'flaky a 2' failed (exit code 7, attempt 1 of 3); retrying in 15s." "-::error"
+install_run install-deps.sh "INSTALL_SCRIPT=flaky a 3"$'\n'"flaky b 0"
+install_check install-deps-gives-up-after-three-attempts 7 "run a;sleep 15;run a;sleep 45;run a" \
+  "+::error title=Install::'flaky a 3' failed 3 times (exit code 7)."
+install_run install-deps.sh "INSTALL_SCRIPT=cat"$'\n'"flaky b 0"
+install_check install-deps-commands-get-no-input 0 "run b"
+install_run install-deps.sh "INSTALL_SCRIPT=flaky a 0" INSTALL_RETRY_DELAYS=soon
+install_check install-deps-rejects-bad-delays 2 "" "+INSTALL_RETRY_DELAYS must be whole seconds"
+version="npx --no -- playwright --version"
+deps="npx --no -- playwright install --with-deps chromium"
+retry1="sleep 15;sudo apt-get update"
+retry2="sleep 45;sudo apt-get update"
+install_run install-browsers.sh FRAMEWORK=playwright
+install_check install-browsers-first-try 0 "$version;$deps;launch chromium" "+install-browsers: chromium launches." \
+  "-::warning" "-::error" "-::notice"
+install_run install-browsers.sh FRAMEWORK=playwright STUB_DEPS_FAILS=2
+install_check install-browsers-retries-apt 0 "$version;$deps;$retry1;$deps;$retry2;$deps;launch chromium" \
+  "+attempt 1 of 3 failed; retrying in 15s, after apt-get update." \
+  "+::notice title=Browser install::Installed chromium with the system packages on attempt 3 of 3." "-::warning"
+install_run install-browsers.sh FRAMEWORK=playwright STUB_DEPS_FAILS=3
+install_check install-browsers-goes-on-without-system-packages 0 \
+  "$version;$deps;$retry1;$deps;$retry2;$deps;npx --no -- playwright install chromium;launch chromium" \
+  "+::warning title=Browser install::chromium installed without the system packages (apt-get failed 3 times: an apt or network problem on the runner). The browsers launch, so the run goes on" \
+  "-::error"
+install_run install-browsers.sh FRAMEWORK=playwright STUB_DEPS_FAILS=3 STUB_LAUNCH_FAILS=chromium
+install_check install-browsers-fails-when-chromium-cannot-launch 1 \
+  "$version;$deps;$retry1;$deps;$retry2;$deps;npx --no -- playwright install chromium;launch chromium" \
+  "+::error title=Browser install::chromium can't launch: its system packages couldn't be installed (apt-get failed 3 times). This is an apt or network problem on the runner, not a test failure; re-run the job." \
+  "-::warning"
+install_run install-browsers.sh FRAMEWORK=playwright STUB_LAUNCH_FAILS=chromium
+install_check install-browsers-launch-error-after-a-full-install 1 "$version;$deps;launch chromium" \
+  "+chromium can't launch, although the install with its system packages succeeded" "-apt or network problem"
+install_run install-browsers.sh FRAMEWORK=playwright STUB_DEPS_FAILS=3 STUB_PLAIN_EXIT=1
+install_check install-browsers-download-fails-too 1 \
+  "$version;$deps;$retry1;$deps;$retry2;$deps;npx --no -- playwright install chromium" \
+  "+apt-get failed 3 times, and the browser download failed too. This is a network problem on the runner, not a test failure"
+install_run install-browsers.sh FRAMEWORK=playwright "BROWSERS=webkit, chromium webkit"
+install_check install-browsers-several 0 \
+  "$version;npx --no -- playwright install --with-deps chromium webkit;launch chromium;launch webkit" \
+  "+chromium launches." "+webkit launches."
+install_run install-browsers.sh FRAMEWORK=cypress
+install_check install-browsers-nothing-for-cypress 0 "" "+cypress installs no Playwright browsers; nothing to do."
+install_run install-browsers.sh FRAMEWORK=playwright BROWSERS=chrome
+install_check install-browsers-rejects-other-browsers 2 "" "+unsupported browser 'chrome' (chromium, firefox, webkit)"
+install_run install-browsers.sh FRAMEWORK=playwright STUB_VERSION_EXIT=1
+install_check install-browsers-needs-the-project-playwright 1 "$version" "+The project has no Playwright CLI"
+install_run install-browsers.sh FRAMEWORK=playwright RUNNER_OS=Linux RUNNER_ARCH=X64 -- key
+install_check install-browsers-cache-key 0 "$version" "+version=1.65.0" "+key=playwright-Linux-X64-1.65.0-chromium"
+install_run install-browsers.sh FRAMEWORK=playwright RUNNER_OS=Linux RUNNER_ARCH=ARM64 PLAYWRIGHT_VERSION=1.66.0 \
+  "BROWSERS=firefox chromium" -- key
+install_check install-browsers-cache-key-pinned 0 "" "+key=playwright-Linux-ARM64-1.66.0-chromium-firefox"
+install_run install-browsers.sh FRAMEWORK=playwright RUNNER_OS=Linux RUNNER_ARCH=X64 STUB_VERSION_EXIT=1 -- key
+install_check install-browsers-no-cache-without-a-version 0 "$version" \
+  "+::warning title=Browser install::Couldn't read the project's Playwright version, so the browsers aren't cached." \
+  "-key=playwright"
 
 echo
 echo "stage-agents.sh"
