@@ -2,7 +2,8 @@ name: ci
 
 # CI for this repository: lint the scripts and workflows, validate the configs, AGENT-RULES.md, the agent
 # definitions and the triage eval's cases, and run the fixture tests (anti-cheat.sh, parse-report.sh,
-# write-summary.sh, fetch-spec.sh, stage-agents.sh, run-agent.sh, check-triage.sh, locator-check.sh, the workflows'
+# write-summary.sh, fetch-spec.sh, install-deps.sh, install-browsers.sh, stage-agents.sh, run-agent.sh,
+# check-triage.sh, locator-check.sh, the workflows'
 # sparse platform checkout and check-platform-checkout.sh, report-defects.sh, load-app-env.sh, the triage eval with a
 # stub engine, and the agent permissions on the real Claude Code and OpenCode, driven by a fake model), and the
 # locator check end to end with a real Playwright and Chromium.
@@ -55,6 +56,9 @@ jobs:
             [ "$name" = "$(basename "$f" .json)" ] || { echo "::error file=$f::name '$name' must match the file name"; exit 1; }
             jq -e '(.error_context_glob // "") | type == "string"' "$f" > /dev/null \
               || { echo "::error file=$f::error_context_glob, if set, must be a glob string"; exit 1; }
+            jq -e '(.playwright_browsers // []) | type == "array" and all(. == "chromium" or . == "firefox" or . == "webkit")' \
+              "$f" > /dev/null \
+              || { echo "::error file=$f::playwright_browsers, if set, must list chromium, firefox or webkit"; exit 1; }
             agents="$(jq -r .agents_dir "$f")"
             for role in planner generator healer; do
               [ -f "$agents/$role.md" ] || { echo "::error file=$f::$agents/$role.md is missing"; exit 1; }
@@ -163,7 +167,33 @@ jobs:
         with:
           node-version: "20"
 
+      # Chromium for the probe project's pinned Playwright, from the cache when it has been installed before. run.sh
+      # installs it with scripts/install-browsers.sh, which retries a failing apt.
+      - name: Playwright browsers cache key
+        id: browsers
+        env:
+          FRAMEWORK: playwright
+          BROWSERS: chromium
+        run: |
+          PLAYWRIGHT_VERSION="$(jq -r '.devDependencies["@playwright/test"] // .dependencies["@playwright/test"] // ""' \
+            tests/locator-probe/project/package.json)" bash scripts/install-browsers.sh key
+
+      - name: Restore the Playwright browsers
+        id: browser-cache
+        if: steps.browsers.outputs.key != ''
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ steps.browsers.outputs.key }}
+
       # A TypeScript Playwright project like the consumers': the healed tests run with the probe preloaded, and
       # scripts/locator-check.sh must find one match, two unknown and two mismatches.
       - name: Locator check with a real browser
         run: bash tests/locator-probe/run.sh
+
+      - name: Save the Playwright browsers
+        if: steps.browsers.outputs.key != '' && steps.browser-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ steps.browsers.outputs.key }}

@@ -1,6 +1,7 @@
 {
   "name": "playwright",
-  "install": ["npm ci", "npx playwright install --with-deps"],
+  "install": ["npm ci"],
+  "playwright_browsers": ["chromium"],
   "run": "npx playwright test --reporter=junit",
   "env": { "PLAYWRIGHT_JUNIT_OUTPUT_NAME": "results/junit.xml" },
   "report_glob": "results/*.xml",

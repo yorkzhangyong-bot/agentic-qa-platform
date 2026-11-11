@@ -1,0 +1,141 @@
+name: browser-install
+
+# The Playwright browser install while apt is down, on a real runner. scripts/install-browsers.sh must:
+#   - with apt's downloads going to a closed port: retry apt 3 times, install Chromium without its system packages,
+#     launch it and pass with a warning;
+#   - with the Ubuntu mirrors' names leading nowhere: see that at once, skip apt, and pass within a minute;
+#   - with a library Chromium needs removed: fail with the error that names apt, not the tests, as the cause.
+# Runs when the install scripts, the framework configs or the workflows change, and on demand.
+
+on:
+  pull_request:
+    paths:
+      - scripts/install-browsers.sh
+      - scripts/install-deps.sh
+      - frameworks/*.json
+      - .github/workflows/**
+  push:
+    branches: [main]
+    paths:
+      - scripts/install-browsers.sh
+      - scripts/install-deps.sh
+      - frameworks/*.json
+      - .github/workflows/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  apt-down:
+    name: Browser install with apt down
+    runs-on: ubuntu-latest
+    env:
+      FRAMEWORK: playwright
+      BROWSERS: chromium
+      INSTALL_RETRY_DELAYS: "2 2"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      - name: Install the probe project
+        working-directory: tests/locator-probe/project
+        run: npm install --no-audit --no-fund --loglevel=error
+
+      - name: Break apt
+        run: |
+          # Every apt download goes through a proxy on a closed port, so each one fails at once.
+          printf 'Acquire::http::Proxy "http://127.0.0.1:9";\nAcquire::https::Proxy "http://127.0.0.1:9";\n' \
+            | sudo tee /etc/apt/apt.conf.d/99-unreachable-for-test > /dev/null
+          # fonts-freefont-ttf is one of the packages --with-deps installs for Chromium, which starts without it.
+          # Removed, it gives apt something to download, so the install fails as in a real outage.
+          if dpkg -s fonts-freefont-ttf > /dev/null 2>&1; then sudo dpkg --remove --force-depends fonts-freefont-ttf; fi
+
+      - name: Install Chromium with apt down
+        working-directory: tests/locator-probe/project
+        run: |
+          # This case is about apt itself failing, so the mirror check must see a mirror that answers, whatever the
+          # real network does: a local one, named in an apt folder of its own (APT_ETC). apt still uses /etc/apt.
+          mkdir -p "$RUNNER_TEMP/apt/sources.list.d" "$RUNNER_TEMP/apt/apt.conf.d" "$RUNNER_TEMP/mirror/ubuntu"
+          printf 'Types: deb\nURIs: http://127.0.0.1:8765/ubuntu/\nSuites: resolute\nComponents: main\n' \
+            > "$RUNNER_TEMP/apt/sources.list.d/ubuntu.sources"
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory "$RUNNER_TEMP/mirror" > /dev/null 2>&1 &
+          for _ in $(seq 1 40); do curl -s -o /dev/null http://127.0.0.1:8765/ubuntu/ && break; sleep 0.25; done
+          set +e
+          APT_ETC="$RUNNER_TEMP/apt" bash "$GITHUB_WORKSPACE/scripts/install-browsers.sh" install > "$RUNNER_TEMP/apt-down.log" 2>&1
+          code=$?
+          set -e
+          # The script's ::warning:: is the expected result here: print its output with workflow commands off.
+          token="$(openssl rand -hex 16)"
+          echo "::stop-commands::$token"
+          cat "$RUNNER_TEMP/apt-down.log"
+          echo "::$token::"
+          fail() { echo "::error::$1"; exit 1; }
+          [ "$code" -eq 0 ] || fail "install-browsers.sh exited $code. Chromium launches without its system packages, so it must go on."
+          grep -q "attempt 2 of 3 failed" "$RUNNER_TEMP/apt-down.log" \
+            || fail "apt didn't fail three times, so this shows nothing. Did apt have nothing to download?"
+          grep -q "installed without the system packages" "$RUNNER_TEMP/apt-down.log" \
+            || fail "no warning about the missing system packages"
+          grep -qx "install-browsers: chromium launches." "$RUNNER_TEMP/apt-down.log" || fail "Chromium didn't launch"
+          echo "ok: apt failed 3 times; Chromium was installed without its system packages and launches."
+
+      - name: Install Chromium with the Ubuntu mirrors unreachable
+        working-directory: tests/locator-probe/project
+        run: |
+          # The mirrors' names now lead to a closed port, as in an outage where they can't be reached: one quick
+          # check must see that and skip the apt attempts.
+          hosts="$(cat /etc/apt/apt-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list 2> /dev/null \
+            | grep -oE 'https?://[^/[:space:]]+' | sed -E 's#^https?://##' | sort -u | tr '\n' ' ')"
+          echo "Blocking: $hosts"
+          echo "127.0.0.1 $hosts" | sudo tee -a /etc/hosts > /dev/null
+          start="$(date +%s)"
+          set +e
+          bash "$GITHUB_WORKSPACE/scripts/install-browsers.sh" install > "$RUNNER_TEMP/mirrors-down.log" 2>&1
+          code=$?
+          set -e
+          seconds=$(( $(date +%s) - start ))
+          token="$(openssl rand -hex 16)"
+          echo "::stop-commands::$token"
+          cat "$RUNNER_TEMP/mirrors-down.log"
+          echo "::$token::"
+          fail() { echo "::error::$1"; exit 1; }
+          [ "$code" -eq 0 ] || fail "install-browsers.sh exited $code. Chromium launches without its system packages, so it must go on."
+          grep -q "no apt mirror answered within 5s" "$RUNNER_TEMP/mirrors-down.log" || fail "the mirror check didn't see that the mirrors are down"
+          if grep -q "attempt 1 of 3 failed" "$RUNNER_TEMP/mirrors-down.log"; then fail "apt was tried although the mirrors are down"; fi
+          grep -qx "install-browsers: chromium launches." "$RUNNER_TEMP/mirrors-down.log" || fail "Chromium didn't launch"
+          [ "$seconds" -lt 60 ] || fail "it took ${seconds}s; with the mirrors down it must skip apt at once"
+          echo "ok: the mirrors are down, apt was skipped, Chromium launches; ${seconds}s."
+
+      - name: Chromium without a library it needs
+        working-directory: tests/locator-probe/project
+        run: |
+          # Chromium can't start without libnss3, and with apt down it can't come back.
+          dpkg -s libnss3 > /dev/null 2>&1 || { echo "::error::libnss3 isn't installed, so this shows nothing."; exit 1; }
+          sudo dpkg --remove --force-depends libnss3
+          set +e
+          bash "$GITHUB_WORKSPACE/scripts/install-browsers.sh" install > "$RUNNER_TEMP/no-nss.log" 2>&1
+          code=$?
+          set -e
+          # The script's ::error:: is the expected result here: print its output with workflow commands off.
+          token="$(openssl rand -hex 16)"
+          echo "::stop-commands::$token"
+          cat "$RUNNER_TEMP/no-nss.log"
+          echo "::$token::"
+          fail() { echo "::error::$1"; exit 1; }
+          [ "$code" -eq 1 ] || fail "install-browsers.sh exited $code. Chromium can't launch, so it must fail."
+          grep -qF "chromium can't launch: its system packages couldn't be installed (no apt mirror answered within 5s" \
+            "$RUNNER_TEMP/no-nss.log" || fail "the error doesn't name the unreachable mirrors as the cause"
+          grep -qF "This is an apt or network problem on the runner, not a test failure; re-run the job." \
+            "$RUNNER_TEMP/no-nss.log" || fail "the error doesn't say that apt is the cause"
+          echo "ok: Chromium can't launch, and the error names apt as the cause."
