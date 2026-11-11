@@ -51,6 +51,10 @@ on:
         description: Turn budget for the defect-reporter agent (claude --max-turns; emulated with a time limit on opencode).
         type: number
         default: 20
+      locator_renames:
+        description: Accessible-name changes the locator check accepts after healing, one "old -> new" per line (e.g. "Sign in -> Log in"). Each use is logged and marked in the pull request. Empty accepts none.
+        type: string
+        default: ""
       report_defects:
         description: Open a GitHub issue for each REAL_BUG failure, or comment on the open issue for it. The caller must grant issues write either way.
         type: boolean
@@ -605,6 +609,15 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Locator check, part 1: each locator the healer changed, old and new. The verification run below records what
+      # the new ones point to (Playwright: a probe preloaded into the test run). Other frameworks: nothing yet.
+      - name: List the changed locators
+        id: locators
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          LOCATOR_CHECK_DIR: ${{ runner.temp }}/locator-check
+        run: bash "$PLATFORM_DIR/scripts/locator-check.sh" targets
+
       # The healer's own runs don't get APP_ENV, because agents never see the app's secrets. This run does, in this
       # step only, so the healed suite also runs against the app as the test job ran it. It runs before anti-cheat, so
       # anti-cheat also checks any file it writes. Its result goes to the job summary and the PR writer; it doesn't
@@ -618,6 +631,9 @@ jobs:
           RUN_CMD: ${{ needs.config.outputs.run }}
           FRAMEWORK_ENV: ${{ needs.config.outputs.env }}
           REPORT_GLOB: ${{ needs.config.outputs.report_glob }}
+          LOCATOR_PROBE: ${{ steps.locators.outputs.probe }}
+          LOCATOR_PROBE_TARGETS: ${{ runner.temp }}/locator-check/probe-targets.json
+          LOCATOR_PROBE_OUT: ${{ runner.temp }}/locator-check/after.jsonl
         run: |
           shopt -s globstar nullglob
           for f in $REPORT_GLOB; do rm -f -- "$f"; done   # drop the reports of the healer's own runs
@@ -626,6 +642,8 @@ jobs:
           [ -n "$env_json" ] || env_json='{}'
           eval "$(jq -r 'to_entries[] | "export \(.key)=\(.value | tostring | @sh)"' <<< "$env_json")"
           if [ -n "$APP_URL" ]; then export BASE_URL="$APP_URL" CYPRESS_BASE_URL="$APP_URL"; fi
+          # The locator check's probe: read-only, it records the element of each changed locator.
+          if [ -n "$LOCATOR_PROBE" ]; then export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require $LOCATOR_PROBE"; fi
           echo "+ $RUN_CMD"
           bash "$PLATFORM_DIR/scripts/load-app-env.sh" -- bash -c "$RUN_CMD"
 
@@ -675,6 +693,33 @@ jobs:
             exit 1
           fi
 
+      # Locator check, part 2. "Before" comes from fresh copies of the failing run's artifacts, which no agent touched:
+      # each old locator on its page snapshot. A changed role or name makes the pull request a draft; an element that
+      # can't be compared is listed for the reviewer. The section goes into PR_BODY.md and the job summary.
+      - name: Download the failing run for the locator check
+        if: steps.changes.outputs.changed == 'true' && steps.locators.outputs.supported == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: test-results
+          path: ${{ runner.temp }}/locator-check/before
+
+      - name: Download the failures for the locator check
+        if: steps.changes.outputs.changed == 'true' && steps.locators.outputs.supported == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: triage
+          path: ${{ runner.temp }}/locator-check/before/results
+
+      - name: Locator check
+        id: locator_check
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          LOCATOR_CHECK_DIR: ${{ runner.temp }}/locator-check
+          LOCATOR_RENAMES: ${{ inputs.locator_renames }}
+        run: bash "$PLATFORM_DIR/scripts/locator-check.sh" report
+
       - name: Restore platform-staged files
         if: steps.changes.outputs.changed == 'true'
         run: |
@@ -717,6 +762,9 @@ jobs:
           labels: auto-heal
           commit-message: "test: auto-heal failing tests (run ${{ github.run_id }})"
           delete-branch: true
+          # A locator that now points to an element with another role or name: a draft, also when this run updates an
+          # open auto-heal pull request, until a reviewer marks it ready.
+          draft: ${{ steps.locator_check.outputs.draft == 'true' && 'always-true' || 'false' }}
 
       - name: Comment on the updated pull request
         if: steps.existing.outputs.number != '' && steps.pr.outputs.pull-request-operation == 'updated'

@@ -2,8 +2,9 @@ name: ci
 
 # CI for this repository: lint the scripts and workflows, validate the configs, AGENT-RULES.md, the agent
 # definitions and the triage eval's cases, and run the fixture tests (anti-cheat.sh, parse-report.sh,
-# write-summary.sh, fetch-spec.sh, stage-agents.sh, run-agent.sh, report-defects.sh, load-app-env.sh, the triage
-# eval with a stub engine, and the agent permissions on the real Claude Code and OpenCode, driven by a fake model).
+# write-summary.sh, fetch-spec.sh, stage-agents.sh, run-agent.sh, check-triage.sh, locator-check.sh,
+# report-defects.sh, load-app-env.sh, the triage eval with a stub engine, and the agent permissions on the real Claude
+# Code and OpenCode, driven by a fake model), and the locator check end to end with a real Playwright and Chromium.
 # No step calls a model API; the real triage eval is the manual eval-triage.yml.
 
 on:
@@ -31,7 +32,7 @@ jobs:
       - name: shellcheck
         run: |
           shellcheck --version
-          shellcheck scripts/*.sh tests/run-tests.sh
+          shellcheck scripts/*.sh tests/run-tests.sh tests/locator-probe/run.sh
 
       - name: actionlint
         env:
@@ -146,3 +147,22 @@ jobs:
         env:
           REQUIRE_ENGINES: "1"
         run: bash tests/run-tests.sh
+
+  locator-probe:
+    name: Locator probe (Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      # A TypeScript Playwright project like the consumers': the healed tests run with the probe preloaded, and
+      # scripts/locator-check.sh must find one match, two unknown and two mismatches.
+      - name: Locator check with a real browser
+        run: bash tests/locator-probe/run.sh

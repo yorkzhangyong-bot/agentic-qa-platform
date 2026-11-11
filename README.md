@@ -83,8 +83,8 @@ test-and-heal.yml
                   run-agent.sh triage → results/triage.json, check-triage.sh (fails without a usable result),
                   write-summary.sh (with the classifications), upload "triage"
   heal            run-agent.sh healer → results/heal-report.json, verification run (with APP_ENV),
-                  anti-cheat.sh, run-agent.sh pr-writer → PR_BODY.md, open PR auto-heal/<run_id>
-                  (or update + comment on the open auto-heal PR)
+                  anti-cheat.sh, run-agent.sh pr-writer → PR_BODY.md, locator-check.sh (draft on a
+                  changed element), open PR auto-heal/<run_id> (or update + comment on the open one)
   report-defects  report-defects.sh prepare → results/defect-candidates.json,
                   run-agent.sh defect-reporter → results/defects/<slug>.md,
                   report-defects.sh publish → a new issue, or a comment on the open one
@@ -103,6 +103,8 @@ generate-tests.yml
   didn't write its result file, instead of silently reporting "no changes".
 - **`scripts/check-triage.sh`** fails the triage job when there is no usable triage result, so heal and
   report-defects are never skipped without an error.
+- **`scripts/locator-check.sh`** checks, without AI, that each locator the healer changed still points to an
+  element with the same role and accessible name; see [Locator check](#locator-check).
 - **`scripts/write-summary.sh`** adds the test results to the job summary, with the triage classifications once
   triage has run (see [Job summary](#job-summary)).
 - **`scripts/report-defects.sh`** turns `REAL_BUG` failures into GitHub issues, without AI: `prepare` computes
@@ -178,6 +180,8 @@ OpenCode's known gaps:
 │   ├── stage-agents.sh          stages agents, rules, permissions and MCP config for ENGINE=claude|opencode
 │   ├── run-agent.sh             runs one agent on the selected engine, checks its expected output
 │   ├── check-triage.sh          fails the triage job when results/triage.json classifies nothing
+│   ├── locator-check.sh         healed locators: same role and accessible name as before? (no AI)
+│   ├── locator-probe/           playwright.cjs: records the healed locators' elements in the verification run
 │   ├── report-defects.sh        REAL_BUG failures → fingerprinted candidates → GitHub issues (no AI)
 │   └── load-app-env.sh          APP_ENV secret → the test runs' environment, never an agent's
 ├── tests/                       fixture tests for the scripts (bash tests/run-tests.sh)
@@ -186,6 +190,8 @@ OpenCode's known gaps:
 │   ├── write-summary/           edge-case XML, triage.json + expected markdown
 │   ├── report-defects/          triage + failures fixtures, expected candidates, sample defect reports
 │   ├── load-app-env/            APP_ENV fixtures (*.env) + expected $GITHUB_ENV
+│   ├── locator-check/           tests before and after healing, a failing run, recorded probe output
+│   ├── locator-probe/           a TypeScript Playwright project: the locator check with a real browser (CI)
 │   └── fetch-spec/              Spec Kit folder fixture + expected spec.md
 ├── evals/                       offline evaluations (evals/README.md): triage cases, sample project, runner
 ├── .github/workflows/
@@ -257,6 +263,7 @@ OpenCode's known gaps:
 | `triage_max_turns` | no | `15` | Turn budget for the triage agent. Exact on claude; emulated on opencode. |
 | `heal_max_turns` | no | `40` | Turn budget for the healer agent. Exact on claude; emulated on opencode. |
 | `defect_max_turns` | no | `20` | Turn budget for the defect-reporter agent. Exact on claude; emulated on opencode. |
+| `locator_renames` | no | `""` | Accessible-name changes the [locator check](#locator-check) accepts after healing, one `old -> new` per line (e.g. `Sign in -> Log in`). Each use is logged and marked in the PR. |
 | `report_defects` | no | `true` | Open a GitHub issue for each `REAL_BUG` failure, or comment on the open issue for it (see [Defect reporting](#defect-reporting)). |
 | `defect_labels` | no | `bug,agentic-qa` | Comma-separated labels for new defect issues. Missing labels are created; `agentic-qa` is always added, because open issues are found again by it. |
 | `defect_assignees` | no | `""` | Comma-separated GitHub logins to assign new defect issues to. If GitHub rejects them, the issue is opened unassigned and the summary says so. |
@@ -315,6 +322,9 @@ How it runs:
   - If the healer changed files, a verification run executes the suite once more, with `APP_ENV`, before
     anti-cheat. Its results go to the job summary ("Test results after healing") and to the PR description; they
     don't block the PR.
+  - After the pr-writer, the [locator check](#locator-check) adds a "Locator check" section to the PR description
+    and the job summary. If a changed locator now points to an element with another role or name, the PR is a
+    draft.
   - The pr-writer agent runs with 20 turns.
   - The job's timeout is 90 minutes.
 - **`report-defects`** runs alongside `heal`, only if `report_defects` is true and triage found `REAL_BUG` items. It
@@ -633,14 +643,50 @@ Every rule has `pass-*` and `fail-*` fixtures in `tests/anti-cheat/`. The script
   artefacts: `results/`, `spec.md`, `PR_BODY.md`.
 - If staging overwrote any of those files that the repository tracks, they are restored before the PR is created.
 
+### Locator check
+
+Anti-cheat reads the diff, so a healer could point a locator at another element, the Cancel button instead of
+Delete, and still pass. `scripts/locator-check.sh` checks each locator the healer changed, with a script, not an
+agent. Playwright only so far; for Cypress and Selenium the PR is unchanged.
+
+- **Before:** what the old locator asked for, on the failing run's page snapshot (`error-context.md`, from fresh
+  copies of the `test-results` and `triage` artifacts, which no agent touched).
+  - Where the page no longer has it, what the old locator itself names: `getByRole` with a name.
+  - Unknown for a test ID, CSS or XPath, which a page snapshot can't show. Also unknown for a label or text the
+    page no longer has, and for a locator built from variables.
+- **After:** the element the new locator resolved to in the verification run.
+  `scripts/locator-probe/playwright.cjs`, preloaded with `NODE_OPTIONS=--require`, records
+  `locator.ariaSnapshot()` the first time a test uses each changed locator. It only reads the page.
+- **Compared:**
+  - The role must match exactly.
+  - The accessible name must match after normalising whitespace and case. For an element without a name, such as
+    a paragraph, its text stands in.
+  - `locator_renames` accepts listed text changes. Each use is logged as a notice and marked in the PR.
+- **Result:** one line per changed locator in the PR's "Locator check" section: `file:line`, old → new locator,
+  before → after (role and name), and the reason.
+  - ❌ a different role or name: the PR is opened as a draft, and an open auto-heal PR it updates goes back to
+    draft.
+  - ❓ can't be compared: no draft, and the line shows the element the locator points to now, for the reviewer to
+    confirm.
+  - ✅ the same role and name.
+
+This is why Playwright's `locator_priority` puts `getByRole` with a name first, then `getByLabel`,
+`getByPlaceholder` or `getByText`, and `getByTestId`, CSS or XPath only as a last resort: only the first kinds can be
+checked. Limits:
+- The probe hooks `@playwright/test` through `require`. ESM test projects, and locators built from variables,
+  come out ❓.
+- An element with the same role and name, the look-alike, passes.
+
 ### Residual risks
 
-These are **not** detected by the script and must be checked by the reviewer (the pr-writer adds a
+These are **not** detected by the scripts and must be checked by the reviewer (the pr-writer adds a
 "Residual risks" section to every PR):
 
-- **An assertion re-targeted to a different element.** If only the locator inside an assertion changes, the check
+- **An assertion re-targeted to a different element.** If only the locator inside an assertion changes, anti-cheat
   passes even when the new locator points at another element. `anti-cheat.sh` lists every such line under
-  "review needed" (also in `results/anti-cheat.txt`), so each one can be confirmed by a human.
+  "review needed" (also in `results/anti-cheat.txt`), so each one can be confirmed by a human. For Playwright the
+  [locator check](#locator-check) catches a different role or name; it can't tell look-alikes apart, or check ❓
+  locators.
 - **Changed test steps.** Removed or reordered actions that aren't assertions, and changed fixtures or test data,
   are allowed by the script.
 
@@ -744,6 +790,15 @@ These are **not** detected by the script and must be checked by the reviewer (th
     rest of the answer key before the agent looks for it, and must keep a `.git` that holds uncommitted work;
   - `check-triage.sh`: a triage file that classifies the failures must pass; nothing to triage, or a triage file
     that is missing, empty, broken or classifies none of the failures, must fail with its reason;
+  - `locator-check.sh` (`tests/locator-check/`), each on a git history of healed tests, a failing run and recorded
+    probe output:
+    - a changed name, and a button that became a link, must be ❌ and make a draft;
+    - a test ID, and a label without a snapshot, must be ❓ without a draft;
+    - a strict-mode fix to the same link, and a page object whose locator spans lines, must be ✅;
+    - a rename on `locator_renames` must pass, and be logged;
+    - Cypress must be skipped.
+
+    The probe's hook is checked with a stand-in `@playwright/test`;
   - agent permissions (`tests/engine-permissions/`): the real `claude` and `opencode`, staged as in CI and driven
     by a fake model, must refuse chained, substituted, expanded and redirected commands, and must still run the
     test command. They must refuse a file outside the repository, and the agent must then still write its result;
@@ -753,7 +808,10 @@ These are **not** detected by the script and must be checked by the reviewer (th
   - `actionlint` on the workflows;
   - validation of the framework JSON, `settings/*.json`, `AGENT-RULES.md` and the agents' front matter;
   - the fixture tests, with Claude Code and OpenCode installed at the versions the workflows use by default, so
-    the permission tests always run there.
+    the permission tests always run there;
+  - the locator check end to end (`tests/locator-probe/run.sh`). A TypeScript Playwright project like the
+    consumers' (its own fixtures, a page object, `expect` assertions) runs its healed tests in Chromium with the
+    probe preloaded. The PR section must then show one match, two unknown and two mismatches.
 - Planned work and the plan for evaluating the platform are in [`BACKLOG.md`](BACKLOG.md).
 - [`evals/README.md`](evals/README.md) describes the offline triage eval. The manual `eval-triage.yml` workflow
   runs it; `ci.yml` only checks it, without calling a model API.

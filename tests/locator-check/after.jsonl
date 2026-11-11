@@ -1,0 +1,7 @@
+{"target": "getByRole('banner').getByRole('link', { name: 'Settings' })", "locator": "getByRole('banner').getByRole('link', { name: 'Settings' })", "test": "opens the settings", "snapshot": "- link \"Settings\":\n  - /url: /settings"}
+{"target": "getByRole('button', { name: 'Cancel' })", "locator": "getByRole('button', { name: 'Cancel' })", "test": "deletes the draft", "snapshot": "- button \"Cancel\""}
+{"target": "getByLabel('Display name')", "locator": "getByLabel('Display name')", "test": "edits the display name", "snapshot": "- textbox \"Display name\""}
+{"target": "getByRole('link', { name: 'Checkout' })", "locator": "getByRole('link', { name: 'Checkout' })", "test": "goes to checkout", "snapshot": "- link \"Checkout\":\n  - /url: /checkout"}
+{"target": "getByTestId('sign-in-button')", "locator": "getByTestId('sign-in-button')", "test": "logs in", "snapshot": "- button \"Sign in\""}
+{"target": "getByRole('button', { name: 'Log in' })", "locator": "getByRole('button', { name: 'Log in' })", "test": "signs in", "snapshot": "- button \"Log in\""}
+{"target": "getByRole('button', { name: 'Save changes' })", "locator": "getByRole('button', { name: 'Save changes' })", "test": "saves the bio", "snapshot": "- button \"Save changes\""}

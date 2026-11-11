@@ -37,6 +37,8 @@ conflicts with them. If a task can only be done by breaking a rule, stop and rep
 3. **Use the framework's `locator_priority`**, best first (see `.agentic-qa/frameworks/<framework>.json`).
    - Confirm every locator against the live app through the `browser` MCP server.
    - Avoid generated CSS classes, `nth-child` chains, absolute XPath and positional indexes.
+   - A changed locator must still point to the same element. After healing, `scripts/locator-check.sh` compares
+     the element's role and accessible name before and after, and a difference makes the pull request a draft.
 4. **Keep tests independent.** Each test:
    - creates the state it needs through the UI, an API or fixtures;
    - never relies on another test or on execution order;
@@ -118,4 +120,5 @@ conflicts with them. If a task can only be done by breaking a rule, stop and rep
 | `results/verify-failures.json` | `scripts/parse-report.sh` (the heal job's verification run) | pr-writer |
 | `results/generate-report.json` | generator | pr-writer |
 | `results/anti-cheat.txt` | `scripts/anti-cheat.sh` (via the workflow) | pr-writer |
+| `results/locator-check.json` | `scripts/locator-check.sh` (after the pr-writer) | workflow (the PR's "Locator check" section; draft on a mismatch) |
 | `PR_BODY.md` | pr-writer | workflow (pull request body) |

@@ -1,0 +1,37 @@
+[
+  {
+    "name": "opens the settings",
+    "classname": "account.spec.ts",
+    "file": "tests/account.spec.ts",
+    "message": "Error: locator.click: strict mode violation: getByText('Settings') resolved to 2 elements",
+    "stack": "Error: locator.click: strict mode violation: getByText('Settings') resolved to 2 elements\n\n    at /home/runner/work/shop/shop/tests/account.spec.ts:5:3\n\nError Context: ../test-results/account-opens-the-settings-chromium/error-context.md"
+  },
+  {
+    "name": "signs in",
+    "classname": "account.spec.ts",
+    "file": "tests/account.spec.ts",
+    "message": "Error: locator.click: Test timeout of 30000ms exceeded.",
+    "stack": "Error: locator.click: Test timeout of 30000ms exceeded.\nCall log:\n  - waiting for getByTestId('login-btn')\n\n    at /home/runner/work/shop/shop/tests/account.spec.ts:9:3\n\nError Context: ../test-results/account-signs-in-chromium/error-context.md"
+  },
+  {
+    "name": "edits the display name",
+    "classname": "account.spec.ts",
+    "file": "tests/account.spec.ts",
+    "message": "Error: locator.fill: Test timeout of 30000ms exceeded.",
+    "stack": "Error: locator.fill: Test timeout of 30000ms exceeded.\nCall log:\n  - waiting for getByLabel('Name', { exact: true })\n\n    at /home/runner/work/shop/shop/tests/account.spec.ts:13:3\n\nError Context: ../test-results/account-edits-the-display-name-chromium/error-context.md"
+  },
+  {
+    "name": "cancels through the page object",
+    "classname": "account.spec.ts",
+    "file": "tests/account.spec.ts",
+    "message": "Error: locator.click: Test timeout of 30000ms exceeded.",
+    "stack": "Error: locator.click: Test timeout of 30000ms exceeded.\nCall log:\n  - waiting for getByRole('button', { name: 'Delete' })\n\n    at /home/runner/work/shop/shop/tests/pages/AccountPage.ts:7:24\n    at /home/runner/work/shop/shop/tests/account.spec.ts:17:3\n\nError Context: ../test-results/account-cancels-through-the-page-object-chromium/error-context.md"
+  },
+  {
+    "name": "shows the checkout",
+    "classname": "account.spec.ts",
+    "file": "tests/account.spec.ts",
+    "message": "Error: expect(locator).toBeVisible() failed",
+    "stack": "Error: expect(locator).toBeVisible() failed\n\nLocator: getByRole('button', { name: 'Checkout' })\nExpected: visible\nReceived: <element(s) not found>\n\n    at /home/runner/work/shop/shop/tests/account.spec.ts:21:3\n\nError Context: ../test-results/account-shows-the-checkout-chromium/error-context.md"
+  }
+]

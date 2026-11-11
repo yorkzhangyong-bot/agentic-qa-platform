@@ -12,7 +12,9 @@
 - [x] Upload Playwright test-results/**/error-context.md with the test artifact and give it to triage (and healer); update the triage eval to include matching snapshots at the same time
 - [ ] Pass app server logs to triage: the page snapshot can't show causes outside the page (e.g. eval case T23, a button disabled by a missing API key). Capture the app's webServer/server output during the test run, mask secrets, and give it to triage as extra evidence; then re-run the triage eval and check T23, without tuning the prompt to it
 - [ ] Tell the healer about error-context.md: the heal job restores it, but its first test run empties test-results/, so the healer must read it first (or run with --output)
-- [ ] Semantic locator check after healing: for each locator the healer changes, compare the element's role and accessible name before and after; if they differ, open the heal PR as a draft and list "before -> after" in the PR body; add test fixtures for match and mismatch
+- [x] Semantic locator check after healing: for each locator the healer changes, compare the element's role and accessible name before and after; if they differ, open the heal PR as a draft and list "before -> after" in the PR body; add test fixtures for match and mismatch (Playwright; an element that can't be compared is shown, without a draft)
+- [ ] Locator check for Cypress and Selenium: an adapter each in scripts/locator-check.sh, and a probe for their verification run
+- [ ] Locator check "before" for test IDs and CSS, which a page snapshot can't show (for example from the app's markup at the base commit)
 - [ ] Later: weekly metrics report, flaky quarantine, test data handling, impact analysis, version tags, pytest framework, port bash scripts to Python
 
 ## Evaluation of the platform

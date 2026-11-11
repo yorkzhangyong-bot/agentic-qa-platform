@@ -1,0 +1,8 @@
+{
+  "name": "locator-probe-check",
+  "private": true,
+  "description": "A TypeScript Playwright project for tests/locator-probe/run.sh: the locator check with a real browser.",
+  "devDependencies": {
+    "@playwright/test": "1.65.0"
+  }
+}
