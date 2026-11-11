@@ -1,9 +1,10 @@
 name: browser-install
 
-# The Playwright browser install while apt is down, on a real runner: every apt download goes through a proxy on a
-# closed port, as when the Ubuntu mirrors can't be resolved. scripts/install-browsers.sh must retry apt, install
-# Chromium without its system packages, launch it and pass with a warning. With a library Chromium needs removed, it
-# must fail with the error that names apt, not the tests, as the cause.
+# The Playwright browser install while apt is down, on a real runner. scripts/install-browsers.sh must:
+#   - with apt's downloads going to a closed port: retry apt 3 times, install Chromium without its system packages,
+#     launch it and pass with a warning;
+#   - with the Ubuntu mirrors' names leading nowhere: see that at once, skip apt, and pass within a minute;
+#   - with a library Chromium needs removed: fail with the error that names apt, not the tests, as the cause.
 # Runs when the install scripts, the framework configs or the workflows change, and on demand.
 
 on:
@@ -82,6 +83,33 @@ jobs:
           grep -qx "install-browsers: chromium launches." "$RUNNER_TEMP/apt-down.log" || fail "Chromium didn't launch"
           echo "ok: apt failed 3 times; Chromium was installed without its system packages and launches."
 
+      - name: Install Chromium with the Ubuntu mirrors unreachable
+        working-directory: tests/locator-probe/project
+        run: |
+          # The mirrors' names now lead to a closed port, as in an outage where they can't be reached: one quick
+          # check must see that and skip the apt attempts.
+          hosts="$(cat /etc/apt/apt-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list 2> /dev/null \
+            | grep -oE 'https?://[^/[:space:]]+' | sed -E 's#^https?://##' | sort -u | tr '\n' ' ')"
+          echo "Blocking: $hosts"
+          echo "127.0.0.1 $hosts" | sudo tee -a /etc/hosts > /dev/null
+          start="$(date +%s)"
+          set +e
+          bash "$GITHUB_WORKSPACE/scripts/install-browsers.sh" install > "$RUNNER_TEMP/mirrors-down.log" 2>&1
+          code=$?
+          set -e
+          seconds=$(( $(date +%s) - start ))
+          token="$(openssl rand -hex 16)"
+          echo "::stop-commands::$token"
+          cat "$RUNNER_TEMP/mirrors-down.log"
+          echo "::$token::"
+          fail() { echo "::error::$1"; exit 1; }
+          [ "$code" -eq 0 ] || fail "install-browsers.sh exited $code. Chromium launches without its system packages, so it must go on."
+          grep -q "no apt mirror answered within 5s" "$RUNNER_TEMP/mirrors-down.log" || fail "the mirror check didn't see that the mirrors are down"
+          if grep -q "attempt 1 of 3 failed" "$RUNNER_TEMP/mirrors-down.log"; then fail "apt was tried although the mirrors are down"; fi
+          grep -qx "install-browsers: chromium launches." "$RUNNER_TEMP/mirrors-down.log" || fail "Chromium didn't launch"
+          [ "$seconds" -lt 60 ] || fail "it took ${seconds}s; with the mirrors down it must skip apt at once"
+          echo "ok: the mirrors are down, apt was skipped, Chromium launches; ${seconds}s."
+
       - name: Chromium without a library it needs
         working-directory: tests/locator-probe/project
         run: |
@@ -99,6 +127,8 @@ jobs:
           echo "::$token::"
           fail() { echo "::error::$1"; exit 1; }
           [ "$code" -eq 1 ] || fail "install-browsers.sh exited $code. Chromium can't launch, so it must fail."
-          grep -qF "chromium can't launch: its system packages couldn't be installed (apt-get failed 3 times). This is an apt or network problem on the runner, not a test failure; re-run the job." \
+          grep -qF "chromium can't launch: its system packages couldn't be installed (no apt mirror answered within 5s" \
+            "$RUNNER_TEMP/no-nss.log" || fail "the error doesn't name the unreachable mirrors as the cause"
+          grep -qF "This is an apt or network problem on the runner, not a test failure; re-run the job." \
             "$RUNNER_TEMP/no-nss.log" || fail "the error doesn't say that apt is the cause"
           echo "ok: Chromium can't launch, and the error names apt as the cause."

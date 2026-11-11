@@ -15,11 +15,14 @@
 #   install-deps.sh  With a stub command that fails its first runs: each command runs once when it passes, is
 #                    retried 15 s and then 45 s later when it fails, and after 3 attempts fails the step with an
 #                    error that names it; the commands get no input.
-#   install-browsers.sh  With stub npx, node, sudo and sleep: one install with the system packages when apt works;
-#                    apt-get update and a retry 15 s and 45 s later when it fails; after 3 failures, the browsers
-#                    without their system packages, going on with a warning when they launch and failing with the
-#                    apt error when they don't. Also a launch failure after a full install, a failed download,
-#                    several browsers, nothing for Cypress, other browsers refused, no Playwright, the cache key.
+#   install-browsers.sh  With stub npx, curl, node, sudo and sleep, and a runner's apt setup: one mirror check, then
+#                    one install with the system packages and short apt timeouts (removed again) when apt works;
+#                    apt-get update and a retry 15 s and 45 s later when it fails; with the mirrors down, or after 3
+#                    failures, the browsers without their system packages, going on with a warning when they launch
+#                    and failing with the apt error when they don't. Also one answering mirror is enough, no apt
+#                    sources, sources.list, a launch failure after a full install, a failed download, several
+#                    browsers, nothing for Cypress, other browsers refused, no Playwright, the cache key. And no
+#                    workflow, config, script or template installs browsers without naming them.
 #   stage-agents.sh  Staging for claude and for opencode in a scratch repo must produce the expected files.
 #   run-agent.sh     With stub `claude` / `opencode` executables, the expected command lines must be built, and a
 #                    missing EXPECTED_OUTPUT must fail the run.
@@ -297,11 +300,20 @@ echo "install-deps.sh, install-browsers.sh"
 istubs="$work/install-stubs"
 istate="$work/install-state"
 iproject="$work/install-project"
-mkdir -p "$istubs" "$iproject"
+iapt="$work/install-apt"
+mkdir -p "$istubs" "$iproject" "$iapt/sources.list.d" "$iapt/apt.conf.d" "$work/install-no-apt" "$work/install-old-apt"
+# A runner's apt setup (APT_ETC), as on GitHub's Ubuntu images: ubuntu.sources points at a list of three mirrors.
+printf 'http://azure.archive.test/ubuntu/\tpriority:1\nhttps://archive.test/ubuntu/\tpriority:2\nhttps://security.test/ubuntu/\tpriority:3\n' \
+  > "$iapt/apt-mirrors.txt"
+printf 'Types: deb\nURIs: mirror+file:%s\nSuites: resolute resolute-updates\nComponents: main universe\n' \
+  "$iapt/apt-mirrors.txt" > "$iapt/sources.list.d/ubuntu.sources"
+printf '# deb http://commented.test/ubuntu jammy main\ndeb [arch=amd64] http://old.test/ubuntu jammy main universe\n' \
+  > "$work/install-old-apt/sources.list"
 # Stubs that log each call to $INSTALL_STATE/calls and never wait: npx (Playwright's CLI; the first
-# STUB_DEPS_FAILS installs with --with-deps fail as apt does when a mirror can't be resolved), node (the launch
-# check; STUB_LAUNCH_FAILS lists the browsers that don't launch), sudo, sleep, and `flaky <name> <n>`, an install
-# command that fails its first n runs.
+# STUB_DEPS_FAILS installs with --with-deps fail as apt does when a mirror can't be resolved), curl (the mirror
+# check; the hosts in STUB_UNREACHABLE, or all, don't answer), node (the launch check; STUB_LAUNCH_FAILS lists the
+# browsers that don't launch), sudo (what tee would write goes to $INSTALL_STATE/tee), sleep, and
+# `flaky <name> <n>`, an install command that fails its first n runs.
 cat > "$istubs/npx" <<'STUB'
 #!/usr/bin/env bash
 echo "npx $*" >> "$INSTALL_STATE/calls"
@@ -319,6 +331,27 @@ case " $* " in
   *" install "*) exit "${STUB_PLAIN_EXIT:-0}" ;;
 esac
 STUB
+cat > "$istubs/curl" <<'STUB'
+#!/usr/bin/env bash
+urls=()
+timeout=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --max-time) timeout="$2"; shift ;;
+    http://*|https://*) urls+=("$1") ;;
+  esac
+  shift
+done
+echo "curl --max-time $timeout ${urls[*]}" >> "$INSTALL_STATE/calls"
+for url in "${urls[@]}"; do
+  host="${url#*://}"
+  host="${host%%/*}"
+  case " ${STUB_UNREACHABLE:-} " in
+    *" all "*|*" $host "*) echo 000 ;;
+    *) echo 200 ;;
+  esac
+done
+STUB
 cat > "$istubs/node" <<'STUB'
 #!/usr/bin/env bash
 echo "launch $3" >> "$INSTALL_STATE/calls"
@@ -326,12 +359,15 @@ case " ${STUB_LAUNCH_FAILS:-} " in
   *" $3 "*) echo "browserType.launch: error while loading shared libraries: libnss3.so" >&2; exit 1 ;;
 esac
 STUB
-for stub in sudo sleep; do
-  cat > "$istubs/$stub" <<'STUB'
+cat > "$istubs/sudo" <<'STUB'
 #!/usr/bin/env bash
-echo "$(basename "$0") $*" >> "$INSTALL_STATE/calls"
+echo "sudo $*" >> "$INSTALL_STATE/calls"
+if [ "$1" = -n ] && [ "$2" = tee ]; then cat > "$INSTALL_STATE/tee"; fi
 STUB
-done
+cat > "$istubs/sleep" <<'STUB'
+#!/usr/bin/env bash
+echo "sleep $*" >> "$INSTALL_STATE/calls"
+STUB
 cat > "$istubs/flaky" <<'STUB'
 #!/usr/bin/env bash
 n=$(( $(cat "$INSTALL_STATE/$1" 2> /dev/null || echo 0) + 1 ))
@@ -349,11 +385,11 @@ install_run() {  # install_run <script> [VAR=value]... [-- ARG...]: scripts/<scr
   mkdir -p "$istate"
   set +e
   (cd "$iproject" && env PATH="$istubs:$PATH" INSTALL_STATE="$istate" GITHUB_OUTPUT="$istate/output" \
-    PLATFORM_DIR="$root" ${vars[@]+"${vars[@]}"} bash "$root/scripts/$script" ${args[@]+"${args[@]}"}) \
-    > "$work/install.out" 2>&1
+    PLATFORM_DIR="$root" APT_ETC="$iapt" ${vars[@]+"${vars[@]}"} bash "$root/scripts/$script" \
+    ${args[@]+"${args[@]}"}) > "$work/install.out" 2>&1
   code=$?
   set -e
-  cat "$istate/output" >> "$work/install.out" 2> /dev/null || true
+  cat "$istate/output" "$istate/tee" >> "$work/install.out" 2> /dev/null || true
 }
 install_check() {  # install_check <name> <exit> <calls, joined with ;> [+present|-absent]...: about the last install_run
   local name="$1" want="$2" want_calls="$3" calls problems="" item
@@ -386,35 +422,58 @@ install_run install-deps.sh "INSTALL_SCRIPT=flaky a 0" INSTALL_RETRY_DELAYS=soon
 install_check install-deps-rejects-bad-delays 2 "" "+INSTALL_RETRY_DELAYS must be whole seconds"
 version="npx --no -- playwright --version"
 deps="npx --no -- playwright install --with-deps chromium"
-retry1="sleep 15;sudo apt-get update"
-retry2="sleep 45;sudo apt-get update"
+plain="npx --no -- playwright install chromium"
+probe="curl --max-time 5 http://azure.archive.test/ubuntu/ https://archive.test/ubuntu/ https://security.test/ubuntu/"
+conf="$iapt/apt.conf.d/99-agentic-qa-timeouts"
+timeouts_on="sudo -n tee $conf"
+timeouts_off="sudo -n rm -f $conf"
+attempts3="$deps;sleep 15;sudo -n apt-get update;$deps;sleep 45;sudo -n apt-get update;$deps"
+mirrors_down="no apt mirror answered within 5s: azure.archive.test, archive.test, security.test"
 install_run install-browsers.sh FRAMEWORK=playwright
-install_check install-browsers-first-try 0 "$version;$deps;launch chromium" "+install-browsers: chromium launches." \
-  "-::warning" "-::error" "-::notice"
+install_check install-browsers-first-try 0 "$version;$probe;$timeouts_on;$deps;launch chromium;$timeouts_off" \
+  "+install-browsers: chromium launches." "+Acquire::Retries \"1\";" "+Acquire::http::Timeout \"10\";" \
+  "+Acquire::https::Timeout \"10\";" "-::warning" "-::error" "-::notice"
 install_run install-browsers.sh FRAMEWORK=playwright STUB_DEPS_FAILS=2
-install_check install-browsers-retries-apt 0 "$version;$deps;$retry1;$deps;$retry2;$deps;launch chromium" \
+install_check install-browsers-retries-apt 0 "$version;$probe;$timeouts_on;$attempts3;launch chromium;$timeouts_off" \
   "+attempt 1 of 3 failed; retrying in 15s, after apt-get update." \
   "+::notice title=Browser install::Installed chromium with the system packages on attempt 3 of 3." "-::warning"
 install_run install-browsers.sh FRAMEWORK=playwright STUB_DEPS_FAILS=3
 install_check install-browsers-goes-on-without-system-packages 0 \
-  "$version;$deps;$retry1;$deps;$retry2;$deps;npx --no -- playwright install chromium;launch chromium" \
+  "$version;$probe;$timeouts_on;$attempts3;$plain;launch chromium;$timeouts_off" \
   "+::warning title=Browser install::chromium installed without the system packages (apt-get failed 3 times: an apt or network problem on the runner). The browsers launch, so the run goes on" \
   "-::error"
 install_run install-browsers.sh FRAMEWORK=playwright STUB_DEPS_FAILS=3 STUB_LAUNCH_FAILS=chromium
 install_check install-browsers-fails-when-chromium-cannot-launch 1 \
-  "$version;$deps;$retry1;$deps;$retry2;$deps;npx --no -- playwright install chromium;launch chromium" \
+  "$version;$probe;$timeouts_on;$attempts3;$plain;launch chromium;$timeouts_off" \
   "+::error title=Browser install::chromium can't launch: its system packages couldn't be installed (apt-get failed 3 times). This is an apt or network problem on the runner, not a test failure; re-run the job." \
   "-::warning"
+install_run install-browsers.sh FRAMEWORK=playwright STUB_UNREACHABLE=all
+install_check install-browsers-skips-apt-when-the-mirrors-are-down 0 "$version;$probe;$plain;launch chromium" \
+  "+install-browsers: $mirrors_down; skipping the system packages." \
+  "+::warning title=Browser install::chromium installed without the system packages ($mirrors_down: an apt or network problem on the runner). The browsers launch, so the run goes on" \
+  "-::error"
+install_run install-browsers.sh FRAMEWORK=playwright STUB_UNREACHABLE=all STUB_LAUNCH_FAILS=chromium
+install_check install-browsers-mirrors-down-and-chromium-cannot-launch 1 "$version;$probe;$plain;launch chromium" \
+  "+::error title=Browser install::chromium can't launch: its system packages couldn't be installed ($mirrors_down). This is an apt or network problem on the runner, not a test failure; re-run the job."
+install_run install-browsers.sh FRAMEWORK=playwright "STUB_UNREACHABLE=azure.archive.test archive.test"
+install_check install-browsers-one-mirror-answering-is-enough 0 \
+  "$version;$probe;$timeouts_on;$deps;launch chromium;$timeouts_off" "-skipping the system packages"
+install_run install-browsers.sh FRAMEWORK=playwright APT_ETC="$work/install-no-apt"
+install_check install-browsers-without-apt-sources 0 "$version;$plain;launch chromium" \
+  "+install-browsers: no apt mirror is configured; skipping the system packages."
+install_run install-browsers.sh FRAMEWORK=playwright APT_ETC="$work/install-old-apt" STUB_UNREACHABLE=all
+install_check install-browsers-reads-sources-list 0 "$version;curl --max-time 5 http://old.test/ubuntu;$plain;launch chromium" \
+  "+no apt mirror answered within 5s: old.test; skipping the system packages." "-commented.test"
 install_run install-browsers.sh FRAMEWORK=playwright STUB_LAUNCH_FAILS=chromium
-install_check install-browsers-launch-error-after-a-full-install 1 "$version;$deps;launch chromium" \
+install_check install-browsers-launch-error-after-a-full-install 1 \
+  "$version;$probe;$timeouts_on;$deps;launch chromium;$timeouts_off" \
   "+chromium can't launch, although the install with its system packages succeeded" "-apt or network problem"
 install_run install-browsers.sh FRAMEWORK=playwright STUB_DEPS_FAILS=3 STUB_PLAIN_EXIT=1
-install_check install-browsers-download-fails-too 1 \
-  "$version;$deps;$retry1;$deps;$retry2;$deps;npx --no -- playwright install chromium" \
-  "+apt-get failed 3 times, and the browser download failed too. This is a network problem on the runner, not a test failure"
+install_check install-browsers-download-fails-too 1 "$version;$probe;$timeouts_on;$attempts3;$plain;$timeouts_off" \
+  "+Couldn't install chromium: the system packages couldn't be installed (apt-get failed 3 times), and the browser download failed too. This is a network problem on the runner, not a test failure"
 install_run install-browsers.sh FRAMEWORK=playwright "BROWSERS=webkit, chromium webkit"
 install_check install-browsers-several 0 \
-  "$version;npx --no -- playwright install --with-deps chromium webkit;launch chromium;launch webkit" \
+  "$version;$probe;$timeouts_on;npx --no -- playwright install --with-deps chromium webkit;launch chromium;launch webkit;$timeouts_off" \
   "+chromium launches." "+webkit launches."
 install_run install-browsers.sh FRAMEWORK=cypress
 install_check install-browsers-nothing-for-cypress 0 "" "+cypress installs no Playwright browsers; nothing to do."
@@ -431,7 +490,34 @@ install_run install-browsers.sh FRAMEWORK=playwright RUNNER_OS=Linux RUNNER_ARCH
 install_check install-browsers-no-cache-without-a-version 0 "$version" \
   "+::warning title=Browser install::Couldn't read the project's Playwright version, so the browsers aren't cached." \
   "-key=playwright"
+# Every Playwright browser install in the workflows, framework configs, scripts and caller templates names its
+# browsers: a bare `playwright install` installs all three, and with --with-deps WebKit's media packages too.
+if python3 - "$root" > "$work/bare-install.log" 2>&1 <<'PY'
+import pathlib
+import re
+import sys
 
+root = pathlib.Path(sys.argv[1])
+files = [*sorted((root / ".github" / "workflows").glob("*.yml")), *sorted((root / "frameworks").glob("*.json")),
+         *sorted((root / "scripts").rglob("*.sh")), *sorted((root / "templates").glob("*.yml")),
+         root / "tests" / "locator-probe" / "run.sh"]
+named = re.compile(r'(chromium|firefox|webkit|"\$\{browsers\[@\]\}")(?![\w-])')
+bad = []
+for path in files:
+    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        for m in re.finditer(r"playwright\s+install(?!-deps)((?:\s+--?[\w-]+)*)\s*(\S*)", line):
+            if not named.match(m.group(2)):
+                bad.append(f"{path.relative_to(root).as_posix()}:{n}: {line.strip()}")
+print("\n".join(bad) or "every browser install names its browsers")
+sys.exit(1 if bad else 0)
+PY
+then
+  ok "every-browser-install-names-its-browsers"
+else
+  bad "every-browser-install-names-its-browsers" "$(cat "$work/bare-install.log")"
+fi
 echo
 echo "stage-agents.sh"
 scratch="$work/scratch"

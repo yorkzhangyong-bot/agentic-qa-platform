@@ -410,18 +410,27 @@ A registry or an apt mirror that fails for a while shouldn't fail a whole run.
   1. It restores `~/.cache/ms-playwright` from the Actions cache. The key holds the OS, the architecture, the
      project's exact Playwright version and the browsers. After a fresh install, the job saves the cache right
      away, so a test job that fails later still saves it.
-  2. It runs `npx playwright install --with-deps <browsers>`. If that fails, it waits 15 s and then 45 s, runs
+  2. It checks the distribution's apt mirrors once: DNS and HTTP, all at once, with a 5 s limit. If none answers,
+     it skips the system packages at once, instead of letting each apt run wait out its timeouts, minutes each.
+  3. Otherwise it runs `npx playwright install --with-deps <browsers>`, with short apt timeouts for these runs
+     (`Acquire::Retries 1`, 10 s for http and https). If that fails, it waits 15 s and then 45 s, runs
      `apt-get update`, and tries again, 3 attempts in all.
-  3. If apt still fails, it installs the browsers without their system packages. The runner image has most of
-     them.
-  4. Each browser must then launch headless.
+  4. If apt can't be reached or still fails, it installs the browsers without their system packages. The runner
+     image has most of them.
+  5. Each browser must then launch headless.
      - If it does, the job goes on, with a warning when the system packages are missing (missing fonts can change
        how pages render).
      - If it doesn't, the job fails with "… can't launch: its system packages couldn't be installed (apt-get failed
-       3 times). This is an apt or network problem on the runner, not a test failure; re-run the job."
-- **Tested on a real runner.** `.github/workflows/browser-install.yml` points apt at a closed port. Chromium must
-  then be installed without its system packages and launch. With `libnss3` removed, the job must fail with that
-  error. It runs when the install scripts, the framework configs or the workflows change, and on demand.
+       3 times, or: no apt mirror answered within 5s). This is an apt or network problem on the runner, not a test
+       failure; re-run the job."
+- **Only the browsers named.** A bare `playwright install` installs all three browsers, and with `--with-deps`
+  WebKit's media packages too. A fixture test fails if a workflow, framework config, script or caller template
+  installs browsers without naming them.
+- **Tested on a real runner.** `.github/workflows/browser-install.yml` runs three cases. It runs when the install
+  scripts, the framework configs or the workflows change, and on demand.
+  - Apt pointed at a closed port: Chromium must be installed without its system packages, and launch.
+  - The mirrors' names leading nowhere: apt must be skipped, and the install must take less than a minute.
+  - `libnss3` removed: the job must fail with that error.
 
 ## App secrets (`APP_ENV`)
 
@@ -829,12 +838,15 @@ These are **not** detected by the scripts and must be checked by the reviewer (t
   - `write-summary.sh`: the same sample reports, an edge-case report and a triage file must produce the markdown in
     `tests/write-summary/*.expected.md`, and missing or broken input must still exit 0;
   - `fetch-spec.sh`: the Spec Kit folder must produce `003-feature.expected.md`;
-  - `install-deps.sh` and `install-browsers.sh`, with stub `npx`, `node`, `sudo` and `sleep`:
+  - `install-deps.sh` and `install-browsers.sh`, with stub `npx`, `curl`, `node`, `sudo` and `sleep`, and a
+    runner's apt setup:
     - a failing command is retried 15 s and 45 s later and fails the step after 3 attempts;
-    - a failing apt gets `apt-get update` and the same retries;
-    - after 3 failures, the browsers are installed without their system packages, and the job goes on when they
-      launch and fails with the apt error when they don't;
+    - a failing apt gets `apt-get update`, the same retries, and short apt timeouts that are removed afterwards;
+    - unreachable mirrors skip apt at once; one answering mirror is enough;
+    - after the retries, or with the mirrors down, the browsers are installed without their system packages. The
+      job goes on when they launch, and fails with the apt error when they don't;
     - also the cache key, several browsers, other browsers refused, and nothing for Cypress;
+    - no workflow, config, script or template installs browsers without naming them;
   - `stage-agents.sh`: staging is checked for both engines, including the tools each agent may use, that an
     OpenCode agent file allows nothing, and that the rules for shell metacharacters deny on both engines (in
     OpenCode, after every allow rule);
