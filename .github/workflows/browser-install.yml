@@ -65,8 +65,15 @@ jobs:
       - name: Install Chromium with apt down
         working-directory: tests/locator-probe/project
         run: |
+          # This case is about apt itself failing, so the mirror check must see a mirror that answers, whatever the
+          # real network does: a local one, named in an apt folder of its own (APT_ETC). apt still uses /etc/apt.
+          mkdir -p "$RUNNER_TEMP/apt/sources.list.d" "$RUNNER_TEMP/apt/apt.conf.d" "$RUNNER_TEMP/mirror/ubuntu"
+          printf 'Types: deb\nURIs: http://127.0.0.1:8765/ubuntu/\nSuites: resolute\nComponents: main\n' \
+            > "$RUNNER_TEMP/apt/sources.list.d/ubuntu.sources"
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory "$RUNNER_TEMP/mirror" > /dev/null 2>&1 &
+          for _ in $(seq 1 40); do curl -s -o /dev/null http://127.0.0.1:8765/ubuntu/ && break; sleep 0.25; done
           set +e
-          bash "$GITHUB_WORKSPACE/scripts/install-browsers.sh" install > "$RUNNER_TEMP/apt-down.log" 2>&1
+          APT_ETC="$RUNNER_TEMP/apt" bash "$GITHUB_WORKSPACE/scripts/install-browsers.sh" install > "$RUNNER_TEMP/apt-down.log" 2>&1
           code=$?
           set -e
           # The script's ::warning:: is the expected result here: print its output with workflow commands off.
