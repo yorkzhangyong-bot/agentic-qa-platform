@@ -10,6 +10,7 @@
 - [ ] Plan-review gate and spec review agent
 - [ ] Limit Claude Code's Read, Grep and Glob to the repository: run-agent.sh allows them by name, so only AGENT-RULES.md keeps a Claude agent out of other folders. Without them in --allowedTools, 2.1.283 refuses a read outside and still reads the workspace; check that its own saved large tool outputs stay readable
 - [x] Upload Playwright test-results/**/error-context.md with the test artifact and give it to triage (and healer); update the triage eval to include matching snapshots at the same time
+- [ ] Pass app server logs to triage: the page snapshot can't show causes outside the page (e.g. eval case T23, a button disabled by a missing API key). Capture the app's webServer/server output during the test run, mask secrets, and give it to triage as extra evidence; then re-run the triage eval and check T23, without tuning the prompt to it
 - [ ] Tell the healer about error-context.md: the heal job restores it, but its first test run empties test-results/, so the healer must read it first (or run with --output)
 - [ ] Semantic locator check after healing: for each locator the healer changes, compare the element's role and accessible name before and after; if they differ, open the heal PR as a draft and list "before -> after" in the PR body; add test fixtures for match and mismatch
 - [ ] Later: weekly metrics report, flaky quarantine, test data handling, impact analysis, version tags, pytest framework, port bash scripts to Python
@@ -23,6 +24,7 @@
 - [x] Record model, engine version, prompt SHA per result
 - [ ] Grouped eval cases: show several failures from the same run together, as triage sees them in CI, so cross-test clues (like "no attacker key") are available.
 - [ ] After each eval run, append its row to the Results history table (by hand for now; automate later).
+- [ ] Weighted error score in the triage eval: count REAL_BUG→FLAKY as critical too, alongside REAL_BUG→SELECTOR_DRIFT, because both hide a real bug; add a weighted score to the report in which these misses cost far more than the reverse (e.g. FLAKY→REAL_BUG), and keep the plain accuracy
 
 ### Benchmark repo (separate consumer repo)
 - [ ] Small app + spec with FR/SC ids
