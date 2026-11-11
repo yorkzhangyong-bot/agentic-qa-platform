@@ -25,6 +25,14 @@
 #                    locator over several lines ✅; a listed rename passes and is logged; Cypress is skipped; no
 #                    changed locator passes. The probe's hook (scripts/locator-probe/playwright.cjs) runs against a
 #                    stand-in @playwright/test. The same check with a real browser is tests/locator-probe/run.sh (CI).
+#   platform checkout  tests/platform-checkout/check.py reads the workflows a consumer calls and builds each sparse
+#                    checkout of the platform with git, as actions/checkout does. None may use cone mode or hold
+#                    evals/, tests/, BACKLOG.md, README.md or .github/; every agent job must run
+#                    check-platform-checkout.sh before its first agent; every platform path a job's steps, scripts
+#                    and agents name must be in that job's checkout; the triage eval's workspace must have the same
+#                    parts. From the agent jobs' checkout, stage-agents.sh must stage every framework for both
+#                    engines, run-agent.sh must find what it hands Claude Code, and locator-check.sh the probe.
+#                    check-platform-checkout.sh must pass that checkout, and fail a full one and one with BACKLOG.md.
 #   report-defects.sh  prepare on tests/report-defects/triage.json + failures.json must produce
 #                    defect-candidates.expected.json; fingerprints must match their definition, survive other timings,
 #                    ids and line numbers, and change with the error. publish runs with a stub `gh`: new issues, a
@@ -601,6 +609,105 @@ if command -v node > /dev/null 2>&1; then
   fi
 else
   echo "  skip  locator-probe-hooks-the-test-fixture (node is not installed)"
+fi
+
+echo
+echo "platform checkout (the workflows' sparse checkout of the platform; tests/platform-checkout/check.py)"
+platform_work="$work/platform-checkout"
+platform_check() {  # platform_check <check>: ok if tests/platform-checkout/check.py <check> passes
+  if python3 "$root/tests/platform-checkout/check.py" "$1" "$root" "$platform_work" > "$work/platform.log" 2>&1; then
+    ok "platform-checkout-$1"
+  else
+    bad "platform-checkout-$1" "$(cat "$work/platform.log")"
+  fi
+}
+platform_check sparse  # a list in every checkout, no cone mode, none of evals/ tests/ BACKLOG.md README.md .github/
+platform_check covers  # every platform path a job's steps, scripts and agents read is in that job's checkout
+platform_check eval    # the triage eval's workspace has the same platform parts as the agent jobs' checkout
+# The scripts, run from the checkout the agent jobs get, as the workflows run them, must find what they read there.
+if sparse="$(python3 "$root/tests/platform-checkout/check.py" checkout "$root" "$platform_work" 2> "$work/platform.log")"; then
+  failed_stages=""
+  for config in "$sparse"/frameworks/*.json; do
+    framework="$(basename "$config" .json)"
+    for engine in claude opencode; do
+      dir="$work/sparse-$framework-$engine"
+      mkdir -p "$dir"
+      git -C "$dir" init -q
+      if ! (cd "$dir" && ENGINE="$engine" FRAMEWORK="$framework" PLATFORM_DIR="$sparse" SKIP_MCP_WARMUP=1 \
+            bash "$sparse/scripts/stage-agents.sh") >> "$work/platform-stage.log" 2>&1; then
+        failed_stages+=" $framework/$engine"
+      fi
+    done
+  done
+  if [ -z "$failed_stages" ]; then
+    ok "platform-checkout-stages-every-framework"
+  else
+    bad "platform-checkout-stages-every-framework" "failed:$failed_stages"$'\n'"$(cat "$work/platform-stage.log")"
+  fi
+  # run-agent.sh hands Claude Code AGENT-RULES.md and the settings file from the checkout: both must be there.
+  rm -f "$work/args.txt"
+  set +e
+  (cd "$work/sparse-playwright-claude" && env PATH="$bin:$PATH" STUB_ARGS="$work/args.txt" PLATFORM_DIR="$sparse" \
+    ENGINE=claude AGENT=triage PROMPT="Do the task." EXPECTED_OUTPUT=results/triage.json \
+    bash "$sparse/scripts/run-agent.sh") > "$work/platform-run.log" 2>&1
+  code=$?
+  set -e
+  missing=""
+  if [ -f "$work/args.txt" ]; then
+    mapfile -t agent_args < "$work/args.txt"
+    for i in "${!agent_args[@]}"; do
+      case "${agent_args[$i]}" in
+        --append-system-prompt-file|--settings)
+          [ -f "${agent_args[$((i + 1))]:-}" ] || missing+=" ${agent_args[$((i + 1))]:-}" ;;
+      esac
+    done
+  else
+    missing=" (claude never ran)"
+  fi
+  if [ "$code" -eq 0 ] && [ -z "$missing" ]; then
+    ok "platform-checkout-runs-an-agent"
+  else
+    bad "platform-checkout-runs-an-agent" "exit $code; missing:$missing"$'\n'"$(cat "$work/platform-run.log")"
+  fi
+  # locator-check.sh hands the verification run the probe from the checkout.
+  locator_case sparse playwright tests/e2e/delete.spec.ts PLATFORM_DIR="$sparse"
+  if [ "$code" -eq 0 ] && grep -E '^probe=.+playwright\.cjs$' "$work/locator-sparse/outputs" \
+      | grep -qF "$(basename "$sparse")"; then
+    ok "platform-checkout-has-the-locator-probe"
+  else
+    bad "platform-checkout-has-the-locator-probe" "exit $code"$'\n'"$(cat "$work/locator-sparse/outputs" "$work/locator-sparse/log" 2> /dev/null)"
+  fi
+  guard_case() {  # guard_case <name> <exit> <checkout> <+present|-absent>...: check-platform-checkout.sh on it
+    local name="$1" want="$2" checkout="$3" problems="" item got
+    shift 3
+    set +e
+    PLATFORM_DIR="$checkout" bash "$sparse/scripts/check-platform-checkout.sh" > "$work/guard.log" 2>&1
+    got=$?
+    set -e
+    for item in "$@"; do
+      if grep -qF -- "${item:1}" "$work/guard.log"; then
+        [ "${item:0:1}" = + ] || problems+="unexpected: ${item:1}"$'\n'
+      else
+        [ "${item:0:1}" = - ] || problems+="missing: ${item:1}"$'\n'
+      fi
+    done
+    if [ "$got" -eq "$want" ] && [ -z "$problems" ]; then
+      ok "$name"
+    else
+      bad "$name" "exit $got (want $want)"$'\n'"$problems$(cat "$work/guard.log")"
+    fi
+  }
+  guard_case check-platform-checkout-passes-the-sparse-checkout 0 "$sparse" \
+    "+none of evals, tests and BACKLOG.md is in" "-::error::"
+  guard_case check-platform-checkout-fails-a-full-checkout 1 "$root" "+/evals is in the platform checkout" \
+    "+/tests is in the platform checkout" "+/BACKLOG.md is in the platform checkout"
+  mkdir -p "$work/backlog-only"
+  printf '# Backlog\n' > "$work/backlog-only/BACKLOG.md"
+  guard_case check-platform-checkout-names-what-it-finds 1 "$work/backlog-only" \
+    "+/BACKLOG.md is in the platform checkout, where an agent could read it." "-/evals is" "-/tests is"
+  guard_case check-platform-checkout-without-a-checkout 2 "$work/no-checkout" "+not found"
+else
+  bad "platform-checkout-builds" "$(cat "$work/platform.log")"
 fi
 
 echo

@@ -196,7 +196,21 @@ jobs:
           ref: ${{ inputs.platform_ref || job.workflow_sha }}
           token: ${{ secrets.PLATFORM_TOKEN || github.token }}
           path: .agentic-qa
+          # Only what the jobs use at run time, never evals/, tests/, BACKLOG.md, README.md or .github/
+          # (tests/platform-checkout/check.py checks both). Not cone mode, which adds every top-level file.
+          sparse-checkout: |
+            /AGENT-RULES.md
+            /agents/
+            /frameworks/
+            /scripts/
+            /settings/
+          sparse-checkout-cone-mode: false
           persist-credentials: false
+
+      # Before any agent runs: the agents must never see the platform's evals/ (the triage eval's answer key),
+      # tests/ or BACKLOG.md, so fail if the checkout above has any of them.
+      - name: Check the platform checkout
+        run: bash "$PLATFORM_DIR/scripts/check-platform-checkout.sh"
 
       # Fails fast on a malformed APP_ENV and masks its values in this job's logs, before any agent runs. Only the
       # test run after generation gets the values.
