@@ -124,7 +124,10 @@ jobs:
           ref: ${{ inputs.platform_ref || job.workflow_sha }}
           token: ${{ secrets.PLATFORM_TOKEN || github.token }}
           path: .agentic-qa
-          sparse-checkout: frameworks
+          # Only frameworks/. Not cone mode, which adds every top-level file, README.md and BACKLOG.md included.
+          sparse-checkout: |
+            /frameworks/
+          sparse-checkout-cone-mode: false
           persist-credentials: false
 
       - name: Read config

@@ -103,6 +103,8 @@ generate-tests.yml
   didn't write its result file, instead of silently reporting "no changes".
 - **`scripts/check-triage.sh`** fails the triage job when there is no usable triage result, so heal and
   report-defects are never skipped without an error.
+- **`scripts/check-platform-checkout.sh`** fails an agent job, before its first agent, if the platform checkout
+  holds `evals/`, `tests/` or `BACKLOG.md`; see [Workflow protections](#workflow-protections).
 - **`scripts/locator-check.sh`** checks, without AI, that each locator the healer changed still points to an
   element with the same role and accessible name; see [Locator check](#locator-check).
 - **`scripts/write-summary.sh`** adds the test results to the job summary, with the triage classifications once
@@ -180,6 +182,7 @@ OpenCode's known gaps:
 │   ├── stage-agents.sh          stages agents, rules, permissions and MCP config for ENGINE=claude|opencode
 │   ├── run-agent.sh             runs one agent on the selected engine, checks its expected output
 │   ├── check-triage.sh          fails the triage job when results/triage.json classifies nothing
+│   ├── check-platform-checkout.sh  fails an agent job if .agentic-qa/ holds evals/, tests/ or BACKLOG.md
 │   ├── locator-check.sh         healed locators: same role and accessible name as before? (no AI)
 │   ├── locator-probe/           playwright.cjs: records the healed locators' elements in the verification run
 │   ├── report-defects.sh        REAL_BUG failures → fingerprinted candidates → GitHub issues (no AI)
@@ -192,6 +195,7 @@ OpenCode's known gaps:
 │   ├── load-app-env/            APP_ENV fixtures (*.env) + expected $GITHUB_ENV
 │   ├── locator-check/           tests before and after healing, a failing run, recorded probe output
 │   ├── locator-probe/           a TypeScript Playwright project: the locator check with a real browser (CI)
+│   ├── platform-checkout/       check.py: the workflows' sparse platform checkout, its exclusions and coverage
 │   └── fetch-spec/              Spec Kit folder fixture + expected spec.md
 ├── evals/                       offline evaluations (evals/README.md): triage cases, sample project, runner
 ├── .github/workflows/
@@ -632,6 +636,18 @@ Every rule has `pass-*` and `fail-*` fixtures in `tests/anti-cheat/`. The script
 
 ### Workflow protections
 
+- Each job checks out only the parts of the platform it uses at run time: `AGENT-RULES.md`, `agents/`,
+  `frameworks/`, `scripts/` and `settings/` (the config job only `frameworks/`). This is a sparse checkout, not in
+  cone mode, which would add every top-level file. So these never reach the consumer's workspace, where the agents
+  could read them:
+  - the triage eval and its answer key (`evals/`);
+  - the platform's fixture tests (`tests/`);
+  - `BACKLOG.md`, which describes eval cases;
+  - `README.md` and `.github/`.
+
+  Before its first agent, each agent job runs `scripts/check-platform-checkout.sh`, which fails the job if
+  `evals/`, `tests/` or `BACKLOG.md` is there anyway. `tests/platform-checkout/check.py` checks that the list
+  covers every platform path the jobs, their scripts and the agents read.
 - The job fails if an agent modified the platform checkout (`.agentic-qa/`), because anti-cheat would then be
   running modified code.
 - The job fails if the pr-writer changed any file after anti-cheat ran.
@@ -757,8 +773,9 @@ These are **not** detected by the scripts and must be checked by the reviewer (t
   manually, or switch the action to a GitHub App token.
 - The artifact names `test-results`, `triage`, `auto-heal-results` and `defects` are fixed, so call
   `test-and-heal.yml` once per workflow run.
-- To run an agent locally, run these from the repository under test with the platform checked out in
-  `.agentic-qa/`:
+- To run an agent locally, check the platform out into `.agentic-qa/` of the repository under test. Take only the
+  parts the workflows check out (see [Workflow protections](#workflow-protections)), so the agents can't read the
+  eval's answer key. Then run these from the repository under test:
   1. `ENGINE=claude FRAMEWORK=playwright bash .agentic-qa/scripts/stage-agents.sh` (or `ENGINE=opencode`)
   2. `ENGINE=claude AGENT=triage PROMPT="Triage results/failures.json" MAX_TURNS=15 EXPECTED_OUTPUT=results/triage.json bash .agentic-qa/scripts/run-agent.sh`
 
@@ -799,6 +816,10 @@ These are **not** detected by the scripts and must be checked by the reviewer (t
     - Cypress must be skipped.
 
     The probe's hook is checked with a stand-in `@playwright/test`;
+  - the platform checkout (`tests/platform-checkout/check.py`): each sparse checkout in the workflows, built with
+    git as `actions/checkout` builds it, must leave out `evals/`, `tests/`, `BACKLOG.md`, `README.md` and
+    `.github/`, and must hold every platform path the job's steps, scripts and agents name. The scripts must run
+    from it, and `check-platform-checkout.sh` must fail a full checkout;
   - agent permissions (`tests/engine-permissions/`): the real `claude` and `opencode`, staged as in CI and driven
     by a fake model, must refuse chained, substituted, expanded and redirected commands, and must still run the
     test command. They must refuse a file outside the repository, and the agent must then still write its result;
