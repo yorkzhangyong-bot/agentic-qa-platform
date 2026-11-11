@@ -19,6 +19,12 @@
 #                    must pass with a warning. Nothing to triage, a missing failures.json, a missing, empty or broken
 #                    triage.json, one without an "items" array, and one that classifies none of the failures must
 #                    each fail with the "No triage result" error and its reason.
+#   locator-check.sh  On git histories of healed tests (tests/locator-check/), with a failing run and recorded
+#                    probe output: another button's name and a button turned link must be ❌ and make a draft; a
+#                    test ID and a label without a snapshot ❓ without a draft; a strict-mode fix and a page object
+#                    locator over several lines ✅; a listed rename passes and is logged; Cypress is skipped; no
+#                    changed locator passes. The probe's hook (scripts/locator-probe/playwright.cjs) runs against a
+#                    stand-in @playwright/test. The same check with a real browser is tests/locator-probe/run.sh (CI).
 #   report-defects.sh  prepare on tests/report-defects/triage.json + failures.json must produce
 #                    defect-candidates.expected.json; fingerprints must match their definition, survive other timings,
 #                    ids and line numbers, and change with the error. publish runs with a stub `gh`: new issues, a
@@ -459,6 +465,139 @@ triage_check triage-unknown-labels 1 "classifies none of the 2 failing tests" "$
   '{"items":[{"name":"a","classification":"selector drift"},{"name":"b"}]}'
 triage_check nothing-to-triage 1 "found no failing test case in their JUnit reports" '[]' -
 triage_check no-failures-file 1 "results/failures.json doesn't exist" - -
+
+echo
+echo "locator-check.sh"
+locator_fixtures="$root/tests/locator-check"
+locator_case() {  # locator_case <dir> <framework> <healed files, comma-separated> [VAR=value...]: targets, then report
+  local dir="$work/locator-$1" framework="$2" files="$3" base file
+  local -a healed
+  shift 3
+  rm -rf "$dir"
+  mkdir -p "$dir/repo" "$dir/check"
+  cp -R "$locator_fixtures/base/." "$dir/repo/"
+  git -C "$dir/repo" init -q
+  git -C "$dir/repo" config core.autocrlf false
+  git -C "$dir/repo" add -A
+  git -C "$dir/repo" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false commit -qm base
+  base="$(git -C "$dir/repo" rev-parse HEAD)"
+  IFS=, read -r -a healed <<< "$files"
+  for file in "${healed[@]}"; do cp "$locator_fixtures/healed/$file" "$dir/repo/$file"; done
+  cp -R "$locator_fixtures/failing" "$dir/check/before"
+  cp "$locator_fixtures/after.jsonl" "$dir/check/after.jsonl"  # what the probe would record
+  printf 'Body written by the pr-writer.\n' > "$dir/repo/PR_BODY.md"
+  set +e
+  (cd "$dir/repo" && export FRAMEWORK="$framework" TEST_DIR=tests BASE_SHA="$base" PLATFORM_DIR="$root" \
+      LOCATOR_CHECK_DIR="$dir/check" GITHUB_OUTPUT="$dir/outputs" GITHUB_STEP_SUMMARY="$dir/summary.md" \
+    && for setting in "$@"; do export "${setting?}"; done \
+    && bash "$root/scripts/locator-check.sh" targets && bash "$root/scripts/locator-check.sh" report) \
+    > "$dir/log" 2>&1
+  code=$?
+  set -e
+  cat "$dir/log" "$dir/repo/PR_BODY.md" "$dir/check/probe-targets.json" "$dir/repo/results/locator-check.json" \
+    > "$dir/all" 2> /dev/null || true
+}
+# A mixed heal: a strict-mode fix to the same link, another button, a test ID, a label without a snapshot, and a
+# button that became a link.
+locator_case mixed playwright tests/e2e/settings.spec.ts,tests/e2e/delete.spec.ts,tests/e2e/profile.spec.ts,tests/e2e/checkout.spec.ts,tests/e2e/login.spec.ts
+check_texts locator-check-flags-a-mismatch "$work/locator-mixed/all" "+status=mismatch" "+draft=true" \
+  "+mismatches=2" "+unknown=2" "+Body written by the pr-writer." "+## Locator check" \
+  "+❌ 2 of 5 changed locators point to an element with a different role or accessible name" \
+  "+- ❌ \`tests/e2e/delete.spec.ts:5\` \`getByRole('button', { name: 'Delete' })\` → \`getByRole('button', { name: 'Cancel' })\`: button \"Delete\" → button \"Cancel\". The accessible name differs." \
+  "+button \"Checkout\" → link \"Checkout\". The role differs." \
+  "+- ❓ \`tests/e2e/login.spec.ts:5\`" "+unknown → button \"Sign in\". The old locator is a test ID" \
+  "+unknown → textbox \"Display name\". There is no page snapshot from the failing run" \
+  "+- ✅ \`tests/e2e/settings.spec.ts:5\`" "+link \"Settings\" → link \"Settings\". Same role and accessible name." \
+  "+::warning title=Locator check::tests/e2e/delete.spec.ts:5" "+\"draft\": true" \
+  "+\"getByRole('banner').getByRole('link', { name: 'Settings' })\"" "+\"getByTestId('sign-in-button')\""
+# The same element: on the failing page (also through a page object a failing stack ran through, with a locator over
+# several lines).
+locator_case match playwright tests/e2e/settings.spec.ts,tests/pages/ProfilePage.ts
+check_texts locator-check-passes-the-same-element "$work/locator-match/all" "+status=pass" "+draft=false" \
+  "+✅ Every changed locator points to an element with the same role and accessible name as before." \
+  "+- ✅ \`tests/pages/ProfilePage.ts:9\`" "+button \"Save changes\" → button \"Save changes\"." "-❌" "-❓"
+# Unknown before (a test ID; a label with no snapshot) shows the element after, and doesn't make a draft.
+locator_case unknown playwright tests/e2e/profile.spec.ts,tests/e2e/login.spec.ts
+check_texts locator-check-unknown-is-no-draft "$work/locator-unknown/all" "+status=unknown" "+draft=false" \
+  "+❓ 2 of 2 changed locators couldn't be compared" "+unknown → button \"Sign in\"." "-❌"
+locator_case rename playwright tests/e2e/signin.spec.ts "LOCATOR_RENAMES=Dashboard -> Home
+\"Sign in\" -> \"Log in\""
+check_texts locator-check-accepts-a-listed-rename "$work/locator-rename/all" "+status=pass" "+draft=false" \
+  "+::notice title=Locator check::tests/e2e/signin.spec.ts:5: accepted rename \"Sign in\" -> \"Log in\" from locator_renames." \
+  "+button \"Sign in\" → button \"Log in\". Accepted rename from locator_renames: \"Sign in\" → \"Log in\"."
+locator_case unlisted playwright tests/e2e/signin.spec.ts
+check_texts locator-check-flags-an-unlisted-rename "$work/locator-unlisted/all" "+status=mismatch" "+draft=true" \
+  "+button \"Sign in\" → button \"Log in\". The accessible name differs."
+locator_case cypress cypress tests/e2e/delete.spec.ts
+check_texts locator-check-skips-other-frameworks "$work/locator-cypress/all" "+supported=false" \
+  "+status=unsupported" "+draft=false" "-## Locator check"
+locator_case none playwright tests/e2e/notes.spec.ts
+check_texts locator-check-without-changed-locators "$work/locator-none/all" "+status=none" "+draft=false" \
+  "+✅ The healer changed no locator."
+# The probe's hook, without Playwright: a stand-in @playwright/test. The test files get a test whose page fixture
+# records the first wait-for-element use of a target locator once, and leaves other locators and isVisible() alone.
+mkdir -p "$work/probe/node_modules/@playwright/test"
+cat > "$work/probe/node_modules/@playwright/test/index.js" <<'JS'
+class Locator {
+  constructor(selector) { this.selector = selector; }
+  toString() { return this.selector; }
+  async ariaSnapshot() { return `- button "${this.selector.includes('Cancel') ? 'Cancel' : 'Other'}"`; }
+  async click() { return 'clicked'; }
+  async isVisible() { return true; }
+}
+const test = { extend(fixtures) { return { fixtures, extend: test.extend }; } };
+Object.defineProperty(exports, '__esModule', { value: true });
+exports.test = test;
+exports.default = test;
+exports.expect = () => {};
+exports.Locator = Locator;
+JS
+cat > "$work/probe/run.js" <<'JS'
+const assert = require('assert');
+const fs = require('fs');
+const pw = require('@playwright/test');
+if (!process.env.LOCATOR_PROBE_TARGETS) {
+  assert.strictEqual(pw.test.fixtures, undefined, 'without targets the module must be unchanged');
+  process.exit(0);
+}
+assert.ok(pw.test.fixtures && pw.test.fixtures.page, 'test has no page fixture');
+assert.strictEqual(pw.default, pw.test, 'the default export must be the same test');
+assert.ok(pw.__esModule && typeof pw.expect === 'function', 'the other exports must stay');
+assert.strictEqual(require('@playwright/test'), pw, 'one copy per module');
+const page = { locator: selector => new pw.Locator(selector) };
+(async () => {
+  await pw.test.fixtures.page({ page }, async () => {}, { titlePath: ['x.spec.ts', 'cancels'], file: '/x.spec.ts' });
+  const target = new pw.Locator("getByRole('button', { name: 'Cancel' })");
+  assert.strictEqual(await target.click(), 'clicked');
+  await target.click();
+  await new pw.Locator("getByRole('link', { name: 'Home' })").click();
+  await new pw.Locator("locator('form').getByRole('button', { name: 'Cancel' })").isVisible();
+  const records = fs.readFileSync(process.env.LOCATOR_PROBE_OUT, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.deepStrictEqual(records.map(r => [r.target, r.test, r.snapshot]),
+                         [["getByRole('button', { name: 'Cancel' })", 'cancels', '- button "Cancel"']]);
+  console.log('probe ok');
+})().catch(error => { console.error(error); process.exit(1); });
+JS
+printf '%s\n' "[\"getByRole('button', { name: 'Cancel' })\"]" > "$work/probe/targets.json"
+probe_preload="$root/scripts/locator-probe/playwright.cjs"
+if command -v cygpath > /dev/null 2>&1; then  # Git Bash doesn't convert paths inside NODE_OPTIONS for Windows node
+  probe_preload="$(cygpath -m "$probe_preload")"
+fi
+if command -v node > /dev/null 2>&1; then
+  set +e
+  (cd "$work/probe" && node --check "$probe_preload" && NODE_OPTIONS="--require $probe_preload" node run.js \
+    && NODE_OPTIONS="--require $probe_preload" LOCATOR_PROBE_TARGETS=targets.json LOCATOR_PROBE_OUT=out.jsonl \
+    node run.js) > "$work/probe.log" 2>&1
+  code=$?
+  set -e
+  if [ "$code" -eq 0 ] && grep -qx "probe ok" "$work/probe.log"; then
+    ok "locator-probe-hooks-the-test-fixture"
+  else
+    bad "locator-probe-hooks-the-test-fixture" "$(cat "$work/probe.log")"
+  fi
+else
+  echo "  skip  locator-probe-hooks-the-test-fixture (node is not installed)"
+fi
 
 echo
 echo "report-defects.sh"

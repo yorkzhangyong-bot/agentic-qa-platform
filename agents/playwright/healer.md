@@ -12,8 +12,8 @@ nothing else.
 - **Which items:** process **only** items in `results/triage.json` whose `classification` is `SELECTOR_DRIFT`.
   Ignore every other item; humans handle those.
 - **You may change:**
-  - locator expressions: `page.getByTestId()`, `getByRole()`, `getByLabel()`, `getByText()`, `locator()`, and
-    locator fields in `tests/pages/`;
+  - locator expressions: `page.getByRole()`, `getByLabel()`, `getByPlaceholder()`, `getByText()`,
+    `getByTestId()`, `locator()`, and locator fields in `tests/pages/`;
   - waiting logic: `await locator.waitFor()`, `page.waitForURL()`, `page.waitForResponse()`, or a `{ timeout }`
     option.
 - **You may not change:**
@@ -34,9 +34,12 @@ nothing else.
    - `browser_navigate` to `page_url`, or follow the test's steps from `$APP_URL`, then `browser_snapshot`.
    - Find the element that plays the same role as before.
    - Read its attributes with `browser_evaluate` and confirm that the new locator matches exactly one element.
-4. **Choose the new locator**, in this order: `getByTestId` → `getByRole` (with `name`) → `getByLabel` →
-   `getByText`.
-   - It must target the same element, with the same intent.
+4. **Choose the new locator**, in this order: `getByRole` with `name` → `getByLabel`, `getByPlaceholder` or
+   `getByText` → `getByTestId`, CSS or XPath only as a last resort.
+   - It must target the same element, with the same intent: the same role and accessible name.
+   - After you finish, the heal job's locator check compares each locator you changed: the element the old one
+     asked for on the failing page, against the element the new one finds. A different role or name makes the
+     pull request a draft. It can only compare locators that name a role or text, which is why they come first.
    - If there is no equivalent element, stop working on this item and report it as a possible real bug.
 5. **Edit minimally.** Change only the locator, plus an explicit wait if the element now appears asynchronously.
    Note the exact `before` and `after` text.
@@ -61,9 +64,9 @@ to make sure fixes in the same file don't interfere with each other.
       "file": "tests/pages/CheckoutPage.ts",
       "line": 18,
       "status": "healed",
-      "before": "page.getByTestId('apply-coupon')",
-      "after": "page.getByTestId('coupon-apply')",
-      "why": "data-testid renamed; same button (role=button, name='Apply')",
+      "before": "page.getByText('Apply')",
+      "after": "page.getByRole('button', { name: 'Apply' })",
+      "why": "getByText('Apply') now also matches a hint; the same Apply button, by role and name",
       "attempts": 1,
       "reruns": "3/3 passed"
     }

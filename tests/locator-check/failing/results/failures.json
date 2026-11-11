@@ -1,0 +1,51 @@
+[
+  {
+    "name": "opens the settings",
+    "classname": "e2e/settings.spec.ts",
+    "file": "tests/e2e/settings.spec.ts",
+    "message": "Error: locator.click: strict mode violation: getByText('Settings') resolved to 2 elements",
+    "stack": "Error: locator.click: strict mode violation: getByText('Settings') resolved to 2 elements\n\n    at /home/runner/work/shop/shop/tests/e2e/settings.spec.ts:5:3\n\nError Context: ../test-results/e2e-settings-opens-the-settings-chromium/error-context.md"
+  },
+  {
+    "name": "deletes the draft",
+    "classname": "e2e/delete.spec.ts",
+    "file": "tests/e2e/delete.spec.ts",
+    "message": "Error: locator.click: Test timeout of 30000ms exceeded.",
+    "stack": "Error: locator.click: Test timeout of 30000ms exceeded.\nCall log:\n  - waiting for getByRole('button', { name: 'Delete' })\n\n    at /home/runner/work/shop/shop/tests/e2e/delete.spec.ts:5:3\n\nError Context: ../test-results/e2e-delete-deletes-the-draft-chromium/error-context.md"
+  },
+  {
+    "name": "edits the display name",
+    "classname": "e2e/profile.spec.ts",
+    "file": "tests/e2e/profile.spec.ts",
+    "message": "Error: locator.fill: Test timeout of 30000ms exceeded.",
+    "stack": "Error: locator.fill: Test timeout of 30000ms exceeded.\nCall log:\n  - waiting for getByLabel('Name', { exact: true })\n\n    at /home/runner/work/shop/shop/tests/e2e/profile.spec.ts:5:3"
+  },
+  {
+    "name": "goes to checkout",
+    "classname": "e2e/checkout.spec.ts",
+    "file": "tests/e2e/checkout.spec.ts",
+    "message": "Error: locator.click: Test timeout of 30000ms exceeded.",
+    "stack": "Error: locator.click: Test timeout of 30000ms exceeded.\nCall log:\n  - waiting for getByRole('button', { name: 'Checkout' })\n\n    at /home/runner/work/shop/shop/tests/e2e/checkout.spec.ts:5:3\n\nError Context: ../test-results/e2e-checkout-goes-to-checkout-chromium/error-context.md"
+  },
+  {
+    "name": "logs in",
+    "classname": "e2e/login.spec.ts",
+    "file": "tests/e2e/login.spec.ts",
+    "message": "Error: locator.click: Test timeout of 30000ms exceeded.",
+    "stack": "Error: locator.click: Test timeout of 30000ms exceeded.\nCall log:\n  - waiting for getByTestId('login-btn')\n\n    at /home/runner/work/shop/shop/tests/e2e/login.spec.ts:5:3\n\nError Context: ../test-results/e2e-login-logs-in-chromium/error-context.md"
+  },
+  {
+    "name": "signs in",
+    "classname": "e2e/signin.spec.ts",
+    "file": "tests/e2e/signin.spec.ts",
+    "message": "Error: locator.click: Test timeout of 30000ms exceeded.",
+    "stack": "Error: locator.click: Test timeout of 30000ms exceeded.\nCall log:\n  - waiting for getByRole('button', { name: 'Sign in' })\n\n    at /home/runner/work/shop/shop/tests/e2e/signin.spec.ts:5:3\n\nError Context: ../test-results/e2e-signin-signs-in-chromium/error-context.md"
+  },
+  {
+    "name": "saves the bio",
+    "classname": "e2e/profile-save.spec.ts",
+    "file": "tests/e2e/profile-save.spec.ts",
+    "message": "Error: locator.click: strict mode violation: getByRole('button', { name: 'Save' }) resolved to 2 elements",
+    "stack": "Error: locator.click: strict mode violation: getByRole('button', { name: 'Save' }) resolved to 2 elements\n\n    at ProfilePage.save (/home/runner/work/shop/shop/tests/pages/ProfilePage.ts:10:17)\n    at /home/runner/work/shop/shop/tests/e2e/profile-save.spec.ts:8:23\n\nError Context: ../test-results/e2e-profile-save-saves-the-bio-chromium/error-context.md"
+  }
+]

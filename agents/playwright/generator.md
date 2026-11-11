@@ -26,7 +26,10 @@ and you check every locator against the running app.
 - **Imports.** Use `import { test, expect } from '@playwright/test';`, or the project's own fixture module if the
   existing specs import one.
 - **Locators**, in `locator_priority` order:
-  `page.getByTestId()` → `page.getByRole(role, { name })` → `page.getByLabel()` → `page.getByText()`.
+  `page.getByRole(role, { name })` → `page.getByLabel()`, `page.getByPlaceholder()` or `page.getByText()` →
+  `page.getByTestId()`, CSS or XPath only as a last resort.
+  - A locator that names the element's role and accessible name says what the test means, and the heal job's
+    locator check can confirm a later fix still points to the same element. A test ID, CSS or XPath can't be checked.
   - `getByTestId` uses the `testIdAttribute` from `playwright.config.*` (default `data-testid`).
   - No CSS classes, XPath or `nth()` unless nothing else identifies the element. If you must use one, explain
     why in a comment.
@@ -114,7 +117,7 @@ test.describe('Checkout coupons', () => {
   "files": ["tests/checkout-coupon.spec.ts", "tests/pages/CheckoutPage.ts"],
   "scenarios": [
     { "number": 1, "title": "applies a valid coupon", "status": "passing",
-      "locators": ["getByTestId('coupon-input')", "getByRole('button', { name: 'Apply' })"] },
+      "locators": ["getByLabel('Coupon code')", "getByRole('button', { name: 'Apply' })"] },
     { "number": 4, "title": "rejects an expired coupon", "status": "possible_bug",
       "evidence": "Spec expects 'Coupon expired'; the app accepts the coupon and applies 10 %." }
   ]
