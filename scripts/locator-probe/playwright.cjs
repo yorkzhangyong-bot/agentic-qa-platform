@@ -81,12 +81,16 @@ function install(out) {
     }
   }
 
+  // @playwright/test exports its `test` function itself, with every export also a property of it (test.test === test,
+  // test.expect, test.defineConfig, ...). The copy is then the extended test, which keeps its own describe, extend,
+  // use and so on, plus the other exports. A module that exports a plain object gets a plain object.
   function withProbe(exported) {
-    if (!exported || typeof exported !== 'object' || !exported.test || typeof exported.test.extend !== 'function')
+    const base = exported && exported.test;
+    if (!base || typeof base.extend !== 'function')
       return exported;
     if (copies.has(exported))
       return copies.get(exported);
-    const test = exported.test.extend({
+    const test = base.extend({
       page: async ({ page }, use, testInfo) => {
         try {
           patch(page);
@@ -97,8 +101,13 @@ function install(out) {
         await use(page);
       },
     });
-    const copy = { ...exported, test };
-    if (exported.default === exported.test)
+    const copy = exported === base ? test : {};
+    for (const key of Object.keys(exported)) {
+      if (!(key in copy))
+        copy[key] = exported[key];
+    }
+    copy.test = test;
+    if (exported.default === base)
       copy.default = test;
     if (exported.__esModule)
       Object.defineProperty(copy, '__esModule', { value: true });

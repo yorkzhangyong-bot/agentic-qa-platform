@@ -534,8 +534,9 @@ check_texts locator-check-skips-other-frameworks "$work/locator-cypress/all" "+s
 locator_case none playwright tests/e2e/notes.spec.ts
 check_texts locator-check-without-changed-locators "$work/locator-none/all" "+status=none" "+draft=false" \
   "+✅ The healer changed no locator."
-# The probe's hook, without Playwright: a stand-in @playwright/test. The test files get a test whose page fixture
-# records the first wait-for-element use of a target locator once, and leaves other locators and isVisible() alone.
+# The probe's hook, without Playwright: a stand-in @playwright/test shaped like the real one, whose export is the test
+# function with every export also a property of it. The test files get a test whose page fixture records the first
+# wait-for-element use of a target locator once, and leaves other locators and isVisible() alone.
 mkdir -p "$work/probe/node_modules/@playwright/test"
 cat > "$work/probe/node_modules/@playwright/test/index.js" <<'JS'
 class Locator {
@@ -545,12 +546,15 @@ class Locator {
   async click() { return 'clicked'; }
   async isVisible() { return true; }
 }
-const test = { extend(fixtures) { return { fixtures, extend: test.extend }; } };
-Object.defineProperty(exports, '__esModule', { value: true });
-exports.test = test;
-exports.default = test;
-exports.expect = () => {};
-exports.Locator = Locator;
+function makeTest(fixtures) {
+  const test = () => {};
+  test.fixtures = fixtures;
+  test.describe = () => {};
+  test.extend = more => makeTest({ ...fixtures, ...more });
+  return test;
+}
+const test = makeTest(undefined);
+module.exports = Object.assign(test, { test, expect: () => {}, defineConfig: config => config, Locator });
 JS
 cat > "$work/probe/run.js" <<'JS'
 const assert = require('assert');
@@ -561,8 +565,8 @@ if (!process.env.LOCATOR_PROBE_TARGETS) {
   process.exit(0);
 }
 assert.ok(pw.test.fixtures && pw.test.fixtures.page, 'test has no page fixture');
-assert.strictEqual(pw.default, pw.test, 'the default export must be the same test');
-assert.ok(pw.__esModule && typeof pw.expect === 'function', 'the other exports must stay');
+assert.ok(typeof pw === 'function' && pw.test === pw, 'the module must stay the test function');
+assert.ok(typeof pw.expect === 'function' && typeof pw.defineConfig === 'function', 'the other exports must stay');
 assert.strictEqual(require('@playwright/test'), pw, 'one copy per module');
 const page = { locator: selector => new pw.Locator(selector) };
 (async () => {
