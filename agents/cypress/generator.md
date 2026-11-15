@@ -41,6 +41,21 @@ check every selector against the running app.
   result from the plan.
 - **Waiting.** Use `cy.intercept('POST', '/api/…').as('alias')` + `cy.wait('@alias')`, plus retrying assertions.
   Never `cy.wait(<number>)`.
+- **Assert on the result of this action, never on state left over from before it.** When an action sends a
+  request, `cy.intercept(…).as('alias')` before the action and `cy.wait('@alias')` before you assert. Where the
+  spec defines a status or an error, assert it (e.g. a rejected comment returns 422).
+
+  ```ts
+  // Bad, race-prone: the status may still read "Rejected" from the previous comment
+  cy.get('[data-cy="comment-post"]').click();
+  cy.get('[data-cy="comment-status"]').should('have.text', 'Rejected');
+
+  // Good: this action's response, waited for before the assertions, and the status the spec defines
+  cy.intercept('POST', '/api/comments').as('postComment');
+  cy.get('[data-cy="comment-post"]').click();
+  cy.wait('@postComment').its('response.statusCode').should('eq', 422);
+  cy.get('[data-cy="comment-status"]').should('have.text', 'Rejected');
+  ```
 - **Independence.** Test isolation is on: set up state in `beforeEach` with `cy.request`, `cy.session`, fixtures or
   existing commands. Never depend on a previous `it`. Use unique test data per test.
 - **Navigation.** `cy.visit('/path')` with relative paths. The base URL comes from `baseUrl` or

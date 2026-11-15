@@ -976,6 +976,10 @@ These are **not** detected by the scripts and must be checked by the reviewer (t
   - `load-app-env.sh`: each `tests/load-app-env/*.env` must load its `*.expected` or fail on the lines its header
     names; no value may be printed outside `::add-mask::`; and no agent step or job-wide env in the workflows may
     get `APP_ENV`;
+  - the race-free assertions rule: `AGENT-RULES.md` and the generator and healer prompts of every framework must
+    hold the rule "Assert on the result of this action, never on state left over from before it", with the
+    framework's response wait (`page.waitForResponse`, `cy.intercept` + `cy.wait('@…')`, `WebDriverWait`), the
+    status example and a bad and a good example; and the check must notice a prompt the rule was removed from;
   - `app-server.sh`, with `tests/app-server/app.py` as the app: a start must wait until the URL answers (a 401
     counts, a 404 doesn't) and leave the app running with the process it spawned; a command that exits, an app
     that never answers, a URL something already answers at, and a second start must fail, with the app's output;

@@ -48,16 +48,34 @@ conflicts with them. If a task can only be done by breaking a rule, stop and rep
    - Playwright: auto-waiting and web-first assertions.
    - Cypress: retry-ability, and `cy.intercept()` + `cy.wait('@alias')`.
    - Selenium: `WebDriverWait` + `ExpectedConditions`.
-6. **Always re-run tests after changes.** Nothing is done until the affected tests have run and passed. A healed
+6. **Assert on the result of this action, never on state left over from before it.** An assertion that the page
+   already satisfied before the action proves nothing about the action, and passes or fails by timing.
+   - When an action sends a request, wait for the server's response before you assert:
+     - Playwright: `page.waitForResponse(…)`, started before the click (`const response = page.waitForResponse(…)`,
+       then the click, then `await response`; or `Promise.all([page.waitForResponse(…), locator.click()])`);
+     - Cypress: `cy.intercept(…).as('alias')` before the action, then `cy.wait('@alias')`;
+     - Selenium: an explicit wait (`WebDriverWait` + `until`) on a condition that this response causes and that
+       was false before the action; never a sleep.
+   - Where the spec defines a status or an error, assert it (e.g. a rejected comment returns 422): the status
+     where the test can see the response, and the error the UI shows.
+   - Bad, race-prone: click "Post", then assert that the status reads "Rejected". The status may still read
+     "Rejected" from the previous comment, so the assertion can pass before this request was even sent.
+   - Good: Playwright: `const response = page.waitForResponse(r => r.url().endsWith('/api/comments'))`, the
+     click, `expect((await response).status()).toBe(422)`, then the text assertion. Cypress:
+     `cy.intercept('POST', '/api/comments').as('post')`, the click,
+     `cy.wait('@post').its('response.statusCode').should('eq', 422)`, then the text assertion. Selenium: read the
+     status text before the click, click, `wait.until(ExpectedConditions.not(ExpectedConditions.textToBe(STATUS,
+     before)))`, then assert "Rejected".
+7. **Always re-run tests after changes.** Nothing is done until the affected tests have run and passed. A healed
    test must pass 3 runs in a row.
-7. **Stop and report real bugs.** If a failure looks like an application bug, don't change the test to make it
+8. **Stop and report real bugs.** If a failure looks like an application bug, don't change the test to make it
    pass. Record the evidence and move on. Signs of an application bug:
    - a wrong value;
    - a missing feature or element;
    - an error page or failed request;
    - a console error;
    - behaviour that contradicts the spec.
-8. **End with a clear summary of what changed and why.** List the files you touched, what changed in each
+9. **End with a clear summary of what changed and why.** List the files you touched, what changed in each
    (before → after), how you verified it, and any open questions.
 
 ## Working agreements

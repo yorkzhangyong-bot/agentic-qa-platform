@@ -21,6 +21,25 @@ else.
   - custom commands: `cypress/support/commands.*` is a forbidden path.
 
   Never add `cy.wait(<number>)`, `.skip`, `.only`, `xit`, `xdescribe` or retries.
+- **Assert on the result of this action, never on state left over from before it.** When you add a wait, wait
+  for the response of the action the assertion checks: `cy.intercept(…).as('alias')` before the action, then
+  `cy.wait('@alias')`, never `cy.wait(<number>)`, and never re-point an assertion at state left over from before
+  the action. Where the test asserts a status or error the spec defines (e.g. a rejected comment returns 422),
+  keep that assertion. A test whose assertion runs before the response is a race, not selector drift: if its
+  selector is fine, mark the item `not_healed` and say so.
+
+  ```ts
+  // Bad, race-prone: a delay, after which the status may still read "Rejected" from the previous comment
+  cy.get('[data-cy="comment-post"]').click();
+  cy.wait(500);
+  cy.get('[data-cy="comment-status"]').should('have.text', 'Rejected');
+
+  // Good: this action's response, waited for before the assertion, which stays as it is
+  cy.intercept('POST', '/api/comments').as('postComment');
+  cy.get('[data-cy="comment-post"]').click();
+  cy.wait('@postComment');
+  cy.get('[data-cy="comment-status"]').should('have.text', 'Rejected');
+  ```
 
 ## Procedure, for each SELECTOR_DRIFT item
 

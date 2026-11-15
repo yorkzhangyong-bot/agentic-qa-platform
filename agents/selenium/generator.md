@@ -35,6 +35,22 @@ tests built on Page Object classes, and you check every locator against the runn
 - **Waits: explicit only.** Use `new WebDriverWait(driver, Duration.ofSeconds(10))` with `ExpectedConditions`
   (`visibilityOfElementLocated`, `elementToBeClickable`, `urlContains`, `textToBePresentInElementLocated`).
   Never `Thread.sleep`, and never change implicit waits.
+- **Assert on the result of this action, never on state left over from before it.** When an action sends a
+  request, wait with `WebDriverWait` + `until` for a condition that this response causes and that was false
+  before the action, never with a sleep. Where the spec defines a status or an error, assert it as the UI shows
+  it (e.g. a rejected comment returns 422 and the page shows "Rejected"; plain Selenium can't read the status).
+
+  ```java
+  // Bad, race-prone: the status may still read "Rejected" from the previous comment
+  driver.findElement(POST_BUTTON).click();
+  assertEquals("Rejected", driver.findElement(COMMENT_STATUS).getText());
+
+  // Good: wait until this action's response has changed the status, then assert the text the spec defines
+  String before = driver.findElement(COMMENT_STATUS).getText();
+  driver.findElement(POST_BUTTON).click();
+  wait.until(ExpectedConditions.not(ExpectedConditions.textToBe(COMMENT_STATUS, before)));
+  assertEquals("Rejected", driver.findElement(COMMENT_STATUS).getText());
+  ```
 - **Assertions.** JUnit 5 `Assertions` (`assertEquals`, `assertTrue`), or AssertJ if the project already uses
   it. Every test asserts the expected result from the plan.
 - **Driver lifecycle.**
