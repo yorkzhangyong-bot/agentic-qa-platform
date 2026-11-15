@@ -53,6 +53,10 @@
 #                    must fail naming those lines and load nothing. No value may be printed outside ::add-mask::.
 #                    Also: CRLF, empty values, % in masks, -- COMMAND, --check, and a guard that no agent step and
 #                    no job-wide env in the workflows gets APP_ENV.
+#   race-free assertions rule  AGENT-RULES.md and the generator and healer prompts of every framework must hold the
+#                    rule "Assert on the result of this action, never on state left over from before it", with the
+#                    framework's response wait, the status example (422) and a bad and a good example; and the check
+#                    must notice a prompt the rule was removed from.
 #   app-server.sh    Stub apps (tests/app-server/app.py) on a free port: start waits until the URL answers (a 401
 #                    counts, a 404 doesn't), leaves the app running, and fails at once when the command exits, after
 #                    the timeout when the app never answers (stopping it again), when something already answers at
@@ -1444,6 +1448,49 @@ then
   ok "no-agent-step-while-the-app-has-app-env"
 else
   bad "no-agent-step-while-the-app-has-app-env" "$(cat "$work/app-server-guard.log")"
+fi
+
+echo
+echo "race-free assertions rule (AGENT-RULES.md and the generator and healer prompts)"
+# The rule must be in the shared rules and in every generator and healer prompt: its sentence, the framework's
+# response wait, the status example and a bad and a good example.
+rule_sentence='Assert on the result of this action, never on state left over from before it'
+rule_files=(AGENT-RULES.md agents/playwright/generator.md agents/playwright/healer.md agents/cypress/generator.md
+  agents/cypress/healer.md agents/selenium/generator.md agents/selenium/healer.md)
+rule_check() {  # rule_check <root>: lists what is missing from each file; exit 1 if anything is
+  local base="$1" problems="" file piece needs
+  for file in "${rule_files[@]}"; do
+    case "$file" in
+      AGENT-RULES.md) needs=("page.waitForResponse" "cy.intercept" "cy.wait('@" "WebDriverWait") ;;
+      agents/playwright/*) needs=("page.waitForResponse") ;;
+      agents/cypress/*) needs=("cy.intercept" "cy.wait('@") ;;
+      agents/selenium/*) needs=("WebDriverWait") ;;
+    esac
+    for piece in "$rule_sentence" "422" "Bad, race-prone" "Good:" "${needs[@]}"; do
+      grep -qF -- "$piece" "$base/$file" || problems+="$file: missing '$piece'"$'\n'
+    done
+  done
+  printf '%s' "$problems"
+  [ -z "$problems" ]
+}
+if output="$(rule_check "$root")"; then
+  ok "rule-in-every-prompt"
+else
+  bad "rule-in-every-prompt" "$output"
+fi
+# The check itself must notice a prompt the rule was removed from.
+rule_copy="$work/rule-copy"
+for file in "${rule_files[@]}"; do
+  mkdir -p "$rule_copy/$(dirname "$file")"
+  cp "$root/$file" "$rule_copy/$file"
+done
+grep -vF -- "$rule_sentence" "$root/agents/cypress/healer.md" > "$rule_copy/agents/cypress/healer.md"
+if output="$(rule_check "$rule_copy")"; then
+  bad "rule-check-notices-a-missing-rule" "passed although the sentence was removed from agents/cypress/healer.md"
+elif [ "$output" = "agents/cypress/healer.md: missing '$rule_sentence'" ]; then   # $(...) drops the final newline
+  ok "rule-check-notices-a-missing-rule"
+else
+  bad "rule-check-notices-a-missing-rule" "$output"
 fi
 
 echo

@@ -21,6 +21,25 @@ nothing else.
   - test steps, test data, titles, configs or application code.
 
   Never add `waitForTimeout`, `.skip`, `.only`, `.fixme` or retries.
+- **Assert on the result of this action, never on state left over from before it.** When you add a wait, wait
+  for the response of the action the assertion checks: `page.waitForResponse(…)` started before the click
+  (`const response = page.waitForResponse(…)`, the click, `await response`), never a fixed delay, and never
+  re-point an assertion at state left over from before the action. Where the test asserts a status or error the
+  spec defines (e.g. a rejected comment returns 422), keep that assertion. A test whose assertion runs before the
+  response is a race, not selector drift: if its locator is fine, mark the item `not_healed` and say so.
+
+  ```ts
+  // Bad, race-prone: a delay, after which the status may still read "Rejected" from the previous comment
+  await page.getByRole('button', { name: 'Post' }).click();
+  await page.waitForTimeout(500);
+  await expect(page.getByTestId('comment-status')).toHaveText('Rejected');
+
+  // Good: this action's response, awaited before the assertion, which stays as it is
+  const response = page.waitForResponse(r => r.url().endsWith('/api/comments') && r.request().method() === 'POST');
+  await page.getByRole('button', { name: 'Post' }).click();
+  await response;
+  await expect(page.getByTestId('comment-status')).toHaveText('Rejected');
+  ```
 
 ## Procedure, for each SELECTOR_DRIFT item
 

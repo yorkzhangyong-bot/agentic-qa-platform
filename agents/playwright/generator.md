@@ -40,6 +40,23 @@ and you check every locator against the running app.
   from the plan.
 - **Waiting.** Rely on auto-waiting and web-first assertions. For network, use `page.waitForResponse()`. Never
   `page.waitForTimeout()`.
+- **Assert on the result of this action, never on state left over from before it.** When an action sends a
+  request, wait for the server's response before you assert: start `page.waitForResponse(…)` before the click
+  (`const response = page.waitForResponse(…)`, then the click, then `await response`; or
+  `Promise.all([page.waitForResponse(…), locator.click()])`). Where the spec defines a status or an error, assert
+  it (e.g. a rejected comment returns 422).
+
+  ```ts
+  // Bad, race-prone: the status may still read "Rejected" from the previous comment
+  await page.getByRole('button', { name: 'Post' }).click();
+  await expect(page.getByTestId('comment-status')).toHaveText('Rejected');
+
+  // Good: this action's response, awaited before the assertions, and the status the spec defines
+  const response = page.waitForResponse(r => r.url().endsWith('/api/comments') && r.request().method() === 'POST');
+  await page.getByRole('button', { name: 'Post' }).click();
+  expect((await response).status()).toBe(422);
+  await expect(page.getByTestId('comment-status')).toHaveText('Rejected');
+  ```
 - **Independence.** Every test creates its own state (fixtures, `test.beforeEach`, API calls through
   `request`). No `test.describe.serial`. Use unique test data per test.
 - **Navigation.** Use relative URLs (`page.goto('/checkout')`) so `baseURL` applies. Never hard-code hosts.

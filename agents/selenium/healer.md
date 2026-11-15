@@ -20,6 +20,25 @@ application, and nothing else.
   - test steps, test data, display names, implicit waits, `pom.xml` or anything under `src/main/`.
 
   Never add `Thread.sleep`, `@Disabled`, `@Ignore` or retries.
+- **Assert on the result of this action, never on state left over from before it.** When you add a wait, wait
+  with `WebDriverWait` + `until` for a condition that the action's response causes and that was false before
+  the action, never with a sleep, and never re-point an assertion at state left over from before the action.
+  Where the test asserts a status or error the spec defines (e.g. a rejected comment returns 422, shown as
+  "Rejected"), keep that assertion. A test whose assertion runs before the response is a race, not selector
+  drift: if its locator is fine, mark the item `not_healed` and say so.
+
+  ```java
+  // Bad, race-prone: a sleep, after which the status may still read "Rejected" from the previous comment
+  driver.findElement(POST_BUTTON).click();
+  Thread.sleep(500);
+  assertEquals("Rejected", driver.findElement(COMMENT_STATUS).getText());
+
+  // Good: wait until this action's response has changed the status; the assertion stays as it is
+  String before = driver.findElement(COMMENT_STATUS).getText();
+  driver.findElement(POST_BUTTON).click();
+  wait.until(ExpectedConditions.not(ExpectedConditions.textToBe(COMMENT_STATUS, before)));
+  assertEquals("Rejected", driver.findElement(COMMENT_STATUS).getText());
+  ```
 
 ## Procedure, for each SELECTOR_DRIFT item
 
