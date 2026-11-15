@@ -14,13 +14,23 @@ case puts back OpenCode's default for that rule, "ask": `opencode run` rejects e
 about, and a rejection ends the run, so there the file must not be written. OpenCode's own folder for truncated tool
 output must stay readable.
 
+The /proc cases: /proc/<pid>/environ shows a process's environment to every process of the same user, and an app the
+workflow started with APP_ENV would show the app's secrets there. The two app phases keep such an app away from the
+agents (README, "Starting the app in the workflow"); the rules for /proc are the second layer, and these cases check
+each route to it: the read, grep and glob tools, and shell commands. /proc/self/environ is the engine's own
+environment, which holds the canary, so a read that gets through leaks it. On OpenCode the cases for its /proc rules
+run with external_directory allowed, so only those rules can refuse, and the refusal must name the rule; the grep and
+glob tools' path route is left to external_directory, because OpenCode matches their rules against the search
+pattern, not the path. Skipped where /proc/self/environ doesn't exist.
+
 No real model is called and no key is needed. The engine gets its own configuration and data directories, so your
 own settings, logins and plugins take no part, and no environment variable that looks like a secret reaches it.
 The browser MCP server is switched off, and opencode's turn limit and Claude Code's -p run are kept short.
 
 Usage: python3 tests/engine-permissions/check.py claude|opencode WORK_DIR
 Prints one tab-separated line per case, "ok|FAIL <TAB> engine expectation command <TAB> detail", and exits 0 if
-every case passed, 1 if one failed, 3 if the engine CLI isn't installed.
+every case passed, 1 if one failed, 3 if the engine CLI isn't installed. PERMTEST_ONLY=<text> runs only the cases
+whose label contains the text (for working on a rule).
 """
 
 import json
@@ -53,12 +63,16 @@ PLACES = {
 }
 OUTSIDE = "{outside}/secret.txt"
 THEN_WRITE = "write:results/triage.json"
+PROC = "/proc/self/environ"   # the engine's own environment, canary included
 ASK_FOR_OUTSIDE = {"permission": {"external_directory": "ask"}}   # OpenCode's own default for paths outside
-# (steps, expected, what shows that it ran, engines[, OpenCode config to add]). steps is one step or a tuple of them:
-# a shell command, "write:<path>" (the write tool), "read:<path>" or "grep:<path>" (those tools); "{outside}" and
-# "{tool-output}" stand for the folders in PLACES. In the marker, "{canary}" stands for the run's canary, "file:<path>"
-# for a file in the workspace. expected: "allowed", "denied", "denied, continues" (the first step is refused, and the
-# last one, THEN_WRITE, still runs) or "stops" (the first step is refused, and the run ends there).
+ALLOW_OUTSIDE = {"permission": {"external_directory": "allow"}}   # so only OpenCode's /proc rules can refuse
+# (steps, expected, what shows that it ran, engines[, options]). steps is one step or a tuple of them: a shell
+# command, "write:<path>" (the write tool), "read:<path>", "grep:<path>", "glob:<path>" or "globpattern:<pattern>"
+# (those tools); "{outside}" and "{tool-output}" stand for the folders in PLACES. In the marker, "{canary}" stands for
+# the run's canary, "file:<path>" for a file in the workspace. expected: "allowed", "denied", "denied, continues" (the
+# first step is refused, and the last one, THEN_WRITE, still runs) or "stops" (the first step is refused, and the run
+# ends there). options: "config", an OpenCode config to add; "rule", the OpenCode permission that must refuse a
+# "denied, continues" step (default external_directory).
 CASES = [
     ("ls && env", "denied", "{canary}", BOTH),
     ("ls; env", "denied", "{canary}", BOTH),
@@ -79,8 +93,26 @@ CASES = [
     ((f"read:{OUTSIDE}", THEN_WRITE), "denied, continues", "{canary}", ("opencode",)),
     (("grep:{outside}", THEN_WRITE), "denied, continues", "{canary}", ("opencode",)),
     ((f"cat {OUTSIDE}", THEN_WRITE), "denied, continues", "{canary}", BOTH),
-    ((f"read:{OUTSIDE}", THEN_WRITE), "stops", "{canary}", ("opencode",), ASK_FOR_OUTSIDE),
+    ((f"read:{OUTSIDE}", THEN_WRITE), "stops", "{canary}", ("opencode",), {"config": ASK_FOR_OUTSIDE}),
     ("read:{tool-output}/secret.txt", "allowed", "{canary}", ("opencode",)),  # OpenCode allows it after every rule
+    # /proc (see the module docstring): the tools, then the shell. On Claude Code the Read rule covers Grep and Glob
+    # and the file commands it knows; on OpenCode its own read and glob rules are checked with external_directory
+    # allowed, and the path route of grep and glob is left to external_directory.
+    ((f"read:{PROC}", THEN_WRITE), "denied, continues", "{canary}", ("claude",)),
+    ((f"read:{PROC}", THEN_WRITE), "denied, continues", "{canary}", ("opencode",),
+     {"rule": "read", "config": ALLOW_OUTSIDE}),
+    (("grep:/proc/self", THEN_WRITE), "denied, continues", "{canary}", BOTH),
+    (("glob:/proc/self", THEN_WRITE), "denied, continues", "{canary}", BOTH),
+    (("globpattern:/proc/*/environ", THEN_WRITE), "denied, continues", "{canary}", ("opencode",),
+     {"rule": "glob", "config": ALLOW_OUTSIDE}),
+    (f"cat {PROC}", "denied", "{canary}", BOTH, {"config": ALLOW_OUTSIDE}),
+    (f"head {PROC}", "denied", "{canary}", BOTH, {"config": ALLOW_OUTSIDE}),
+    (f"tail {PROC}", "denied", "{canary}", BOTH, {"config": ALLOW_OUTSIDE}),
+    (f"grep -a PERMTEST {PROC}", "denied", "{canary}", BOTH, {"config": ALLOW_OUTSIDE}),
+    (f"less {PROC}", "denied", "{canary}", BOTH, {"config": ALLOW_OUTSIDE}),
+    ("ls /proc", "denied", "cpuinfo", BOTH, {"config": ALLOW_OUTSIDE}),
+    ("ls /proc/self", "denied", "environ", BOTH, {"config": ALLOW_OUTSIDE}),
+    ("cat /pr*/self/environ", "denied", "{canary}", BOTH),  # a shell glob names /proc without writing it
 ]
 
 
@@ -162,7 +194,8 @@ def engine_env(engine, work, ws, base_env, port, canary, bin_dir, config=None):
     return env
 
 
-TOOLS = {"write": ("Write", "write"), "read": ("Read", "read"), "grep": ("Grep", "grep")}  # (Claude Code, OpenCode)
+TOOLS = {"write": ("Write", "write"), "read": ("Read", "read"), "grep": ("Grep", "grep"),   # (Claude Code, OpenCode)
+         "glob": ("Glob", "glob"), "globpattern": ("Glob", "glob")}
 
 
 def step_tool(step, engine):
@@ -187,7 +220,9 @@ def run_case(engine, work, ws, base_env, bin_dir, steps, marker, config=None):
         for name, folder in places.items():  # forward slashes, which Git Bash on Windows reads too
             step = step.replace("{%s}" % name, folder.as_posix())
         kind, _, path = step.partition(":")
-        if kind in TOOLS:  # the tools get an absolute path in the platform's own form
+        if kind == "globpattern":  # a pattern, taken as it is
+            requests.append(step)
+        elif kind in TOOLS:  # the tools get an absolute path in the platform's own form
             requests.append(f"{kind}:{Path(path) if Path(path).is_absolute() else ws / path}")
         else:
             requests.append(step)
@@ -241,19 +276,20 @@ def short(text, length=110):
     return " ".join(str(text).split())[:length]
 
 
-def judge_refusal(engine, expected, first, leaked, wrote, output):
+def judge_refusal(engine, expected, first, leaked, wrote, output, rule="external_directory"):
     """(ok, detail) for a two-step case: the first step must be refused without reading the file. With "denied,
-    continues" the agent must then write the file; with "stops" the run must end at the refusal."""
+    continues" the agent must then write the file; with "stops" the run must end at the refusal. On OpenCode the
+    refusal of a "denied, continues" step must come from the permission `rule`."""
     if leaked:
         return False, "the file was read: its canary reached the model"
     if first is None:
         return False, "no refusal reported: " + short(output, 200)
-    if engine == "opencode" and expected == "denied, continues" and '"permission":"external_directory"' not in first:
+    if engine == "opencode" and expected == "denied, continues" and f'"permission":"{rule}"' not in first:
         if "rejected permission" in first:
             return False, ("OpenCode asked to allow it and `opencode run` rejected the request, instead of a deny "
                            "rule refusing it; " + ("then the agent wrote results/triage.json" if wrote
                                                    else "the run ended there"))
-        return False, "refused by another rule than external_directory: " + short(first)
+        return False, f"refused by another rule than {rule}: " + short(first)
     if engine == "opencode" and expected == "stops" and "rejected permission" not in first:
         return False, "refused, but not by rejecting a permission request: " + short(first)
     if expected == "denied, continues" and not wrote:
@@ -261,8 +297,8 @@ def judge_refusal(engine, expected, first, leaked, wrote, output):
     if expected == "stops" and wrote:
         return False, "refused, but the run went on: " + short(first)
     then = "then the agent wrote results/triage.json" if wrote else "and the run ended there"
-    rule = " by the external_directory rule" if engine == "opencode" and expected == "denied, continues" else ""
-    return True, f"refused{rule} ({short(first, 60)}); {then}"
+    by = f" by the {rule} rule" if engine == "opencode" and expected == "denied, continues" else ""
+    return True, f"refused{by} ({short(first, 60)}); {then}"
 
 
 def main():
@@ -275,12 +311,22 @@ def main():
     ws = workspace(work, engine, base_env)
     bin_dir = opencode_wrapper(work, base_env) if engine == "opencode" else None
     failed = 0
-    for steps, expected, marker, engines, *config in CASES:
+    for steps, expected, marker, engines, *rest in CASES:
         if engine not in engines:
+            continue
+        options = rest[0] if rest else {}
+        config = options.get("config")
+        label = steps if isinstance(steps, str) else " then ".join(steps)
+        if config:
+            label += f" (with {json.dumps(config, separators=(',', ':'))})"
+        if os.environ.get("PERMTEST_ONLY") and os.environ["PERMTEST_ONLY"] not in label:
+            continue
+        if "/proc" in label and not Path(PROC).exists():
+            print(f"skip\t{engine} {expected} {label!r}\tno {PROC} on this system", flush=True)
             continue
         started = time.monotonic()
         offered, ran, leaked, refusals, first, output = run_case(engine, work, ws, base_env, bin_dir, steps, marker,
-                                                                 *config)
+                                                                 config)
         seconds = time.monotonic() - started
         if not offered:
             ok, detail = False, "the engine offered the model no such tool: " + short(output, 200)
@@ -291,15 +337,13 @@ def main():
                       else "no refusal reported: " + short(output, 200))
         elif expected in ("denied, continues", "stops"):
             wrote = (ws / THEN_WRITE[len("write:"):]).exists()
-            ok, detail = judge_refusal(engine, expected, first, leaked, wrote, output)
+            ok, detail = judge_refusal(engine, expected, first, leaked, wrote, output,
+                                       options.get("rule", "external_directory"))
         else:
             ok = ran and not refusals
             detail = ("ran" if ok else "refused: " + short(refusals[-1]) if refusals
                       else "it did not run: " + short(output, 200))
         failed += not ok
-        label = steps if isinstance(steps, str) else " then ".join(steps)
-        if config:
-            label += f" (with {json.dumps(config[0], separators=(',', ':'))})"
         print(f"{'ok' if ok else 'FAIL'}\t{engine} {expected} {label!r}\t{detail} ({seconds:.0f}s)", flush=True)
     return 1 if failed else 0
 

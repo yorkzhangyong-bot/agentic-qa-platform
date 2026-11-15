@@ -78,12 +78,15 @@ test-and-heal.yml
                                                └──(REAL_BUG)────────► report-defects
 
   config          _select-framework.yml validates the engine and reads frameworks/<framework>.json
-  test            check out the commit, install-deps.sh, install-browsers.sh (Playwright), load-app-env.sh, run tests,
+  test            check out the commit, install-deps.sh, install-browsers.sh (Playwright), load-app-env.sh,
+                  app-server.sh start (app_start_command; with APP_ENV), run tests, app-server.sh stop,
                   write-summary.sh, upload "test-results"
   triage          check out the same commit, parse-report.sh → results/failures.json, stage-agents.sh,
-                  run-agent.sh triage → results/triage.json, check-triage.sh (fails without a usable result),
+                  app-server.sh start (without APP_ENV), run-agent.sh triage → results/triage.json,
+                  app-server.sh stop, check-triage.sh (fails without a usable result),
                   write-summary.sh (with the classifications), upload "triage"
-  heal            run-agent.sh healer → results/heal-report.json, verification run (with APP_ENV),
+  heal            app-server.sh start (without APP_ENV), run-agent.sh healer → results/heal-report.json,
+                  app-server.sh stop, app-server.sh start (with APP_ENV), verification run, app-server.sh stop,
                   anti-cheat.sh, run-agent.sh pr-writer → PR_BODY.md, locator-check.sh (draft on a
                   changed element), open PR auto-heal/<run_id> (or update + comment on the open one)
   report-defects  report-defects.sh prepare → results/defect-candidates.json,
@@ -91,11 +94,11 @@ test-and-heal.yml
                   report-defects.sh publish → a new issue, or a comment on the open one
 
 generate-tests.yml
-  config ──► generate: fetch-spec.sh → spec.md
-                       stage-agents.sh → run-agent.sh planner → results/plan.md
-                       run-agent.sh generator → tests + results/generate-report.json
-                       run tests (with APP_ENV) → write-summary.sh → anti-cheat.sh
-                       run-agent.sh pr-writer → PR auto-generate/<run_id>
+  config ──► generate: fetch-spec.sh → spec.md, stage-agents.sh
+                       app-server.sh start (without APP_ENV) → run-agent.sh planner → results/plan.md
+                       run-agent.sh generator → tests + results/generate-report.json → app-server.sh stop
+                       app-server.sh start (with APP_ENV) → run tests → app-server.sh stop
+                       write-summary.sh → anti-cheat.sh → run-agent.sh pr-writer → PR auto-generate/<run_id>
 ```
 
 - **`scripts/install-deps.sh`** and **`scripts/install-browsers.sh`** install the framework and, for Playwright,
@@ -117,6 +120,10 @@ generate-tests.yml
   each failure's fingerprint, `publish` opens or updates the issues (see [Defect reporting](#defect-reporting)).
 - **`scripts/load-app-env.sh`** loads the consumer's `APP_ENV` secret into the test runs, never into an agent step
   (see [App secrets](#app-secrets-app_env)).
+- **`scripts/app-server.sh`** starts the consumer's app for a job when the caller sets `app_start_command`, waits
+  until it answers and stops it again, so the agents have an app to explore: once without `APP_ENV` for the
+  agents, once with it for the test run (see
+  [Starting the app in the workflow](#starting-the-app-in-the-workflow-app_start_command)).
 
 ## Agent engines
 
@@ -176,8 +183,8 @@ OpenCode's known gaps:
 │   └── selenium/                planner.md, generator.md, healer.md
 ├── settings/
 │   ├── claude-mcp.json          MCP server "browser" (@playwright/mcp, headless, pinned version)
-│   ├── claude-settings.json     Claude Code Bash allow/deny list
-│   └── opencode-permissions.json  OpenCode bash/edit/webfetch/external_directory permissions ({TEST_DIR} filled in)
+│   ├── claude-settings.json     Claude Code Bash allow/deny list; /proc denied for Read, Grep, Glob and Bash
+│   └── opencode-permissions.json  OpenCode bash/edit/read/glob/webfetch/external_directory permissions ({TEST_DIR} filled in)
 ├── scripts/
 │   ├── fetch-spec.sh            spec file, Spec Kit folder, GitHub issue or Jira ticket → spec.md
 │   ├── parse-report.sh          JUnit XML (any framework) → results/failures.json
@@ -192,13 +199,15 @@ OpenCode's known gaps:
 │   ├── report-defects.sh        REAL_BUG failures → fingerprinted candidates → GitHub issues (no AI)
 │   ├── install-deps.sh          the framework's install commands, each retried when it fails
 │   ├── install-browsers.sh      Playwright browsers: apt retried, a launch check, the cache key
-│   └── load-app-env.sh          APP_ENV secret → the test runs' environment, never an agent's
+│   ├── load-app-env.sh          APP_ENV secret → the test runs' environment, never an agent's
+│   └── app-server.sh            starts the consumer's app for a job (app_start_command), waits for it, stops it
 ├── tests/                       fixture tests for the scripts (bash tests/run-tests.sh)
 │   ├── anti-cheat/              base/ sample project + *.diff fixtures (pass-* and fail-*)
 │   ├── parse-report/            Playwright, Cypress, Surefire XML + expected JSON
 │   ├── write-summary/           edge-case XML, triage.json + expected markdown
 │   ├── report-defects/          triage + failures fixtures, expected candidates, sample defect reports
 │   ├── load-app-env/            APP_ENV fixtures (*.env) + expected $GITHUB_ENV
+│   ├── app-server/              app.py: a stand-in app for the app-server.sh tests
 │   ├── locator-check/           tests before and after healing, a failing run, recorded probe output
 │   ├── locator-probe/           a TypeScript Playwright project: the locator check with a real browser (CI)
 │   ├── platform-checkout/       check.py: the workflows' sparse platform checkout, its exclusions and coverage
@@ -237,7 +246,9 @@ OpenCode's known gaps:
    Also add `JIRA_TOKEN` if you generate tests from Jira. If the app itself needs secrets to run, see
    [App secrets](#app-secrets-app_env).
 2. Add the variable `APP_URL`: a running, **disposable test instance** of the app that CI can reach. Never use
-   production.
+   production. If nothing serves the app in CI, let the workflows start it: set `app_start_command` and point
+   `APP_URL` at the URL it listens on (see
+   [Starting the app in the workflow](#starting-the-app-in-the-workflow-app_start_command)).
 3. Under **Settings → Actions → General**, enable **Allow GitHub Actions to create and approve pull requests**.
 4. Create the labels `auto-heal`, `auto-generate` and `ready-for-tests`. Only maintainers should be able to apply
    `ready-for-tests`. The defect labels (`bug` and `agentic-qa` by default) are created on first use.
@@ -250,7 +261,8 @@ OpenCode's known gaps:
    Keep `issues: write` in the `permissions` of the test-and-heal caller. The `report-defects` job needs it, and
    GitHub won't start the workflow without it, even with `report_defects: false`.
 7. Make the tests read their base URL from the environment. The workflows export `APP_URL` and `BASE_URL`, and
-   for Cypress also `CYPRESS_BASE_URL`.
+   for Cypress also `CYPRESS_BASE_URL`. With a Playwright `webServer` and `app_start_command`, set
+   `reuseExistingServer: true`, so a test run reuses the app the workflow started.
 8. Check that the framework's commands work from the repository root (`npm ci` + `npx playwright test`,
    `npx cypress run`, or `mvn -B test`).
 9. Push to `main` or open a pull request. Failures caused by selector drift come back as an `auto-heal` PR, and
@@ -267,7 +279,11 @@ OpenCode's known gaps:
 |---|---|---|---|
 | `framework` | yes | — | Framework config to use: `playwright`, `cypress`, `selenium` (any `frameworks/<name>.json`). |
 | `test_dir` | no | framework's `default_test_dir` | Directory containing the tests, relative to the repository root. |
-| `app_url` | no | `""` | Base URL of a running, disposable test instance of the app. Exported as `APP_URL`, `BASE_URL` and `CYPRESS_BASE_URL`. The agents browse it through MCP. |
+| `app_url` | no | `""` | Base URL of a running, disposable test instance of the app. Exported as `APP_URL`, `BASE_URL` and `CYPRESS_BASE_URL`. The agents browse it through MCP. With `app_start_command`, the URL the started app listens on, e.g. `http://localhost:4200`. |
+| `app_start_command` | no | `""` | Command that starts the app in each job that needs it, run with bash from the repository root. The `test` job and the heal job's verification run get it with `APP_ENV`, the agents without; it is stopped afterwards. Needs `app_url`. See [Starting the app in the workflow](#starting-the-app-in-the-workflow-app_start_command). |
+| `app_ready_url` | no | `app_url` | URL that answers once the started app is up (HTTP 2xx, 3xx or 400–403). |
+| `app_ready_timeout` | no | `120` | Seconds to wait for `app_ready_url`. The job fails when it never answers. |
+| `app_reset_command` | no | `""` | Resets the app's test data, run with bash and `APP_ENV` before every start of `app_start_command`. |
 | `engine` | no | `claude` | Agent engine: `claude` or `opencode`. Anything else fails in the `config` job, before the tests run. |
 | `node_version` | no | `"20"` | Node.js version. Always installed, because the engines and the MCP server need it. |
 | `java_version` | no | `"17"` | Java version. Installed when the framework runs Maven or Gradle. |
@@ -352,7 +368,11 @@ How it runs:
 |---|---|---|---|
 | `framework` | yes | — | Framework config to use. |
 | `test_dir` | no | framework's `default_test_dir` | Where the generated tests go. |
-| `app_url` | no | `""` | Disposable test instance the planner and generator explore through MCP. Exported as in `test-and-heal.yml`. |
+| `app_url` | no | `""` | Disposable test instance the planner and generator explore through MCP. Exported as in `test-and-heal.yml`. With `app_start_command`, the URL the started app listens on. |
+| `app_start_command` | no | `""` | Command that starts the app in the job: without `APP_ENV` for the planner and generator, and again with it for the test run after generation; stopped afterwards. Needs `app_url`. See [Starting the app in the workflow](#starting-the-app-in-the-workflow-app_start_command). |
+| `app_ready_url` | no | `app_url` | URL that answers once the started app is up (HTTP 2xx, 3xx or 400–403). |
+| `app_ready_timeout` | no | `120` | Seconds to wait for `app_ready_url`. The job fails when it never answers. |
+| `app_reset_command` | no | `""` | Resets the app's test data, run with bash and `APP_ENV` before every start of `app_start_command`. |
 | `engine` | no | `claude` | Agent engine: `claude` or `opencode`. |
 | `spec_path` | no | `""` | Markdown spec file or Spec Kit feature folder in the repository. Highest priority (see [Spec sources](#spec-sources)). |
 | `issue_number` | no | `""` | GitHub issue whose title and body are the spec. |
@@ -449,12 +469,15 @@ aren't visible to reusable workflows, so they would arrive empty.
 
 **Only test runs get the values; agent steps never do.**
 - `test-and-heal.yml`: the `test` job, which runs no agent, loads them for its test run. The `heal` job loads them
-  only into its verification run after the healer.
-- `generate-tests.yml`: only the test run after generation gets them. A malformed `APP_ENV` fails the job at the
-  start, before any agent runs.
-- In a job that also runs agents, the values exist only in the test command's environment. Nothing is written to
-  `$GITHUB_ENV` or to disk.
-- `tests/run-tests.sh` checks the workflows for this: no job-wide `APP_ENV`, and no agent step with it.
+  only into its verification run after the healer. With `app_start_command`, the app those runs use is started
+  with them too, and the app the agents use without them.
+- `generate-tests.yml`: only the test run after generation gets them, and the app started for that run. A
+  malformed `APP_ENV` fails the job at the start, before any agent runs.
+- In a job that also runs agents, the values exist only in the environment of the test command, of
+  `app_reset_command` and of the app started for the test run, which is stopped before the next agent step.
+  Nothing is written to `$GITHUB_ENV` or to disk.
+- `tests/run-tests.sh` checks the workflows for this: no job-wide `APP_ENV`, no agent step with it, and no agent
+  step while an app started with it is up.
 
 **Format:**
 - Blank lines and lines starting with `#` are skipped.
@@ -473,15 +496,97 @@ aren't visible to reusable workflows, so they would arrive empty.
   or page text: the agents read the test results. For Playwright, the `test-results` artifact also holds a page
   snapshot, the page's text at the failure, in each `error-context.md`.
 
-**Limits.** The agents' own test runs don't get these values: the triage agent's flakiness re-run, the healer's
-three runs and the generator's runs start the app without them. If the app can't start without its secrets, the
-agents can't verify their work, and the healer reverts what it can't verify. Then point `app_url` at a running test
-instance, or let the app start without those secrets.
+**Limits.** The agents' own test runs don't get these values, and neither does the app the workflow starts for the
+agents with `app_start_command`: the triage agent's flakiness re-run, the healer's three runs and the generator's
+runs see the app without them. If the app can't start without its secrets, the agents can't verify their work, and
+the healer reverts what it can't verify. Then point `app_url` at a running test instance, or let the app start
+without those secrets; settings that aren't secret can go into `app_start_command` itself.
 
 `scripts/load-app-env.sh` does the loading:
 - `load-app-env.sh` appends to `$GITHUB_ENV`, for a job without agents;
 - `load-app-env.sh -- <command>` runs one command with the values;
 - `load-app-env.sh --check` only validates and masks.
+
+## Starting the app in the workflow (`app_start_command`)
+
+A caller job that `uses:` a reusable workflow has no steps of its own, so nothing serves the app while the agents
+work unless something outside CI does. Playwright's `webServer` starts the app only inside `npx playwright test`,
+and Cypress and Selenium have nothing like it. In the benchmark's generate run, both agents got
+`net::ERR_CONNECTION_REFUSED` on `localhost:4200` and gave up exploring. With `app_start_command`, the workflows
+start the app themselves, in a plain workflow step, and stop it again:
+
+```yaml
+    with:
+      app_url: http://localhost:4200           # where the started app listens
+      app_start_command: npm run start         # run with bash from the repository root
+      # app_ready_url: http://localhost:4200/   # default: app_url
+      # app_ready_timeout: 120                  # seconds
+      # app_reset_command: npm run db:seed      # before every start, with APP_ENV
+```
+
+- `app_start_command` needs `app_url`: the agents go there through MCP (`$APP_URL`), and the test runs get it as
+  `BASE_URL` and `CYPRESS_BASE_URL`. Don't put secrets into the command: it is printed, and a process's command
+  line is visible to every user. Settings that aren't secret can go there (`FEATURE_X=1 npm run start`).
+- The app is ready when `app_ready_url` answers with 2xx, 3xx or 400–403, Playwright's rule for a `webServer`: a
+  login page or a 403 counts, a 404 or a 5xx doesn't. `scripts/app-server.sh` polls every second, fails at once if
+  the command exits first, and after `app_ready_timeout` seconds otherwise, printing the end of the app's output.
+  Raise the timeout if the app builds before it listens.
+- The app runs in a process group of its own, so a stop ends everything the command spawned. Every stop step runs
+  with `if: always()`, so the app is stopped after a failure too. A stop waits until the URL no longer answers; if
+  something else still answers, the step fails, because a restart would test the wrong instance. A start fails the
+  same way when something already answers at the URL.
+- The app's output goes to a log outside the workspace. Its last lines appear in the step's log when the start
+  fails and when the app is stopped, where the `APP_ENV` values are masked. The log is deleted at stop and never
+  uploaded.
+
+**Two starts per job: without `APP_ENV` for the agents, with it for the test run.** On the runner the app and the
+agents run as the same user, and any process can read `/proc/<pid>/environ` of another process of that user, so an
+app started with `APP_ENV` would show its secrets to an agent that reads that file. The workflows therefore start
+the app twice in a job that runs agents:
+
+| Job | The agents' app (without `APP_ENV`) | The test run's app (with `APP_ENV`) |
+|---|---|---|
+| `test` (test-and-heal) | — | reset, start, run tests, stop |
+| `triage` | reset, start, triage agent, stop | — |
+| `heal` | reset, start, healer, stop | reset, start, verification run, stop; then the pr-writer |
+| `generate` | reset, start, planner, generator, stop | reset, start, run tests, stop; then the pr-writer |
+
+`app_reset_command` runs before every start, with `APP_ENV`, as a workflow step, never as an agent. No agent step
+runs while an app started with `APP_ENV` is up; `tests/run-tests.sh` checks the workflows for that. The trade-off:
+while the agents explore and run tests, the app has none of its secrets, so a feature that needs one is missing or
+disabled there. The agents are told to report that rather than work around it, and only the workflow's own test
+run exercises those features. That is the situation the agents were in before: their own `npx playwright test`
+runs have always started the app without `APP_ENV`. Running the app as a separate OS user would hide its
+environment and could give the agents the app with its secrets, but it needs passwordless `sudo`, leaves the app
+unable to write into a workspace owned by the runner's user, and mixes file ownership in the checkout; it isn't
+done. The `/proc` rules of both engines are a second layer, not the protection; see [Security](#security).
+
+**Playwright's `webServer`.** When the workflow has started the app, an agent's `npx playwright test` and the test
+run must reuse it instead of starting a second copy on the same port. Set `reuseExistingServer: true`:
+
+```ts
+// playwright.config.ts
+webServer: {
+  command: 'npm run start',
+  url: 'http://localhost:4200',
+  reuseExistingServer: true, // the agentic-qa workflows start the app themselves
+},
+```
+
+The common `reuseExistingServer: !process.env.CI` is false on GitHub Actions, and Playwright then refuses to run
+while the port is busy. With `true`, Playwright starts the app when nothing listens, as on a developer's machine,
+and reuses it when the workflow's app is there. Cypress and Selenium need nothing: they read `CYPRESS_BASE_URL`
+and `APP_URL`. Without `app_start_command` nothing changes: Playwright's `webServer` starts the app inside each
+test run, as before, and the agents can only explore an app that `app_url` reaches.
+
+**Test data.** The agents may change data while they explore, and their test runs create data. Before its own test
+run the workflow stops the app, runs `app_reset_command` if set, and starts the app again. For an app that keeps
+its state in memory the restart is the reset; for a database or files, `app_reset_command` must rebuild the test
+data (a seed script, a copy of a fixture database). State kept in files that git tracks is a problem: changes to
+them show up in the diff that goes into the pull request. Keep such state out of git, and reset it with
+`app_reset_command`.
+
+Self-hosted runners need `curl` and a bash with job control for this; nothing else.
 
 ## Job summary
 
@@ -804,12 +909,29 @@ These are **not** detected by the scripts and must be checked by the reviewer (t
     about, and in 1.19.5 a rejected request ends the run, so an agent that looked outside wrote no result. Its own
     folder for truncated tool output stays readable. `ls` isn't checked for paths.
   - **Claude Code** refuses `cat` outside the repository in `dontAsk` mode, and the agent carries on. Its Read,
-    Grep and Glob tools aren't limited by path, because `run-agent.sh` allows them by name, so there the rule
-    alone keeps an agent out.
+    Grep and Glob tools aren't limited by path, apart from `/proc` (next point), because `run-agent.sh` allows
+    them by name, so there the rule alone keeps an agent out of other folders.
+- **A running process's environment is kept away from the agents.** Any process can read `/proc/<pid>/environ`
+  of another process of the same user, so an app started with `APP_ENV` would show its secrets to an agent. With
+  `app_start_command` the workflows therefore start the app twice: without `APP_ENV` for the agents, and with it
+  only for the test runs, which no agent step overlaps (`tests/run-tests.sh` checks the workflows for that); see
+  [Starting the app in the workflow](#starting-the-app-in-the-workflow-app_start_command). As a second layer,
+  both engines deny `/proc` on every route:
+  - **Claude Code:** `Read(//proc/**)`, which covers the Read, Grep and Glob tools and the file commands Claude
+    Code recognises in Bash (`cat`, `head`, `tail`, `sed`, `tee`), plus the Bash rules `*/proc/*` and `* /proc`
+    for any command that names `/proc` (`ls /proc`, `less`, `grep`).
+  - **OpenCode:** `read` and `glob` rules for `*/proc/*` (its read rules match the path relative to the
+    project, hence the leading `*`) and the same Bash rules. Its grep and glob rules match the search pattern,
+    not the path, so the path route of those tools stays with `external_directory: deny`.
+  - `tests/engine-permissions/check.py` checks each route on both engines: the read, grep and glob tools on
+    `/proc/self/environ`, `cat`, `head`, `tail`, `grep` and `less` on it, `ls /proc`, and a shell glob
+    (`/pr*/self/environ`) that names `/proc` without writing it. The rules are a backstop: the two app phases
+    are the protection.
 - **Checkouts use `persist-credentials: false`**, so agents can't push with the workflow token. Only
   `create-pull-request` pushes, after the guardrails pass.
 - **App secrets (`APP_ENV`) never reach an agent step.** Only test runs get them, masked in the logs; see
-  [App secrets](#app-secrets-app_env).
+  [App secrets](#app-secrets-app_env). With `app_start_command`, the app the agents use is started without them,
+  and the app started with them is stopped before the next agent step.
 - **Third-party actions are pinned to a commit SHA.** `peter-evans/create-pull-request` is pinned to `5f6978f…`
   (`# v8.1.1`). GitHub's own `actions/*` use major tags.
 
@@ -854,6 +976,14 @@ These are **not** detected by the scripts and must be checked by the reviewer (t
   - `load-app-env.sh`: each `tests/load-app-env/*.env` must load its `*.expected` or fail on the lines its header
     names; no value may be printed outside `::add-mask::`; and no agent step or job-wide env in the workflows may
     get `APP_ENV`;
+  - `app-server.sh`, with `tests/app-server/app.py` as the app: a start must wait until the URL answers (a 401
+    counts, a 404 doesn't) and leave the app running with the process it spawned; a command that exits, an app
+    that never answers, a URL something already answers at, and a second start must fail, with the app's output;
+    a stop must end the whole process group, wait until nothing answers, print the end of the log and delete it,
+    do nothing without an app, and fail when something still answers; `APP_ENV` must reach the app through
+    `load-app-env.sh --`, and `APP_ENV` itself must not. In the workflows, no agent step may run while an app
+    started with `APP_ENV` is up, and every start must run only with `app_start_command` and have a stop that
+    runs after a failure too. Skipped on Windows;
   - `report-defects.sh`: `prepare` must produce `defect-candidates.expected.json`, and fingerprints must match
     their definition, stay the same when timings, ids and line numbers change, and change with the error;
     `publish` runs against a stub `gh` (new issues, a comment on an open issue, failed `gh` calls, missing and
@@ -881,8 +1011,10 @@ These are **not** detected by the scripts and must be checked by the reviewer (t
     from it, and `check-platform-checkout.sh` must fail a full checkout;
   - agent permissions (`tests/engine-permissions/`): the real `claude` and `opencode`, staged as in CI and driven
     by a fake model, must refuse chained, substituted, expanded and redirected commands, and must still run the
-    test command. They must refuse a file outside the repository, and the agent must then still write its result;
-    see [Security](#security). Skipped for an engine that isn't installed, unless `REQUIRE_ENGINES=1`.
+    test command. They must refuse a file outside the repository, and `/proc` on every route (the read, grep and
+    glob tools; `cat`, `head`, `tail`, `grep`, `less` and `ls` on `/proc`, also through a shell glob), and the
+    agent must then still write its result; see [Security](#security). Skipped for an engine that isn't
+    installed, unless `REQUIRE_ENGINES=1`.
 - `.github/workflows/ci.yml` runs on every push and pull request:
   - `shellcheck` on the scripts;
   - `actionlint` on the workflows;

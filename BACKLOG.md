@@ -1,6 +1,8 @@
 # Backlog
 
 ## Platform backlog
+- [x] Start the consumer's app in the workflow jobs (app_start_command, scripts/app-server.sh): without APP_ENV for the agents, with it for the test runs; app_reset_command before every start; /proc denied on both engines as a second layer
+- [ ] Give the agents the app with its secrets when a consumer needs secret-dependent features during exploration: run the app as a separate OS user (sudo --preserve-env), so its environment is unreadable; needs passwordless sudo and a workspace the app can write to
 - [ ] Verdict job: fail the run on REAL_BUG, ENV, unhealed drift (optional fail_on_flaky)
 - [ ] Requirement coverage report: FR/SC ids in test names vs spec
 - [x] Cache the Playwright browsers in jobs (keyed on OS, architecture and the exact Playwright version), with apt retried and a launch check when apt stays down
@@ -11,7 +13,7 @@
 - [ ] Plan-review gate and spec review agent
 - [ ] Limit Claude Code's Read, Grep and Glob to the repository: run-agent.sh allows them by name, so only AGENT-RULES.md keeps a Claude agent out of other folders. Without them in --allowedTools, 2.1.283 refuses a read outside and still reads the workspace; check that its own saved large tool outputs stay readable
 - [x] Upload Playwright test-results/**/error-context.md with the test artifact and give it to triage (and healer); update the triage eval to include matching snapshots at the same time
-- [ ] Pass app server logs to triage: the page snapshot can't show causes outside the page (e.g. eval case T23, a button disabled by a missing API key). Capture the app's webServer/server output during the test run, mask secrets, and give it to triage as extra evidence; then re-run the triage eval and check T23, without tuning the prompt to it
+- [ ] Pass app server logs to triage: the page snapshot can't show causes outside the page (e.g. eval case T23, a button disabled by a missing API key). Capture the app's webServer/server output during the test run, mask secrets, and give it to triage as extra evidence; then re-run the triage eval and check T23, without tuning the prompt to it. With app_start_command, scripts/app-server.sh already keeps the app's output in a log outside the workspace while the app runs (deleted at stop, because the test run's app has APP_ENV); a masked copy could go into the test-results artifact
 - [ ] Tell the healer about error-context.md: the heal job restores it, but its first test run empties test-results/, so the healer must read it first (or run with --output)
 - [x] Semantic locator check after healing: for each locator the healer changes, compare the element's role and accessible name before and after; if they differ, open the heal PR as a draft and list "before -> after" in the PR body; add test fixtures for match and mismatch (Playwright; an element that can't be compared is shown, without a draft)
 - [ ] Locator check for Cypress and Selenium: an adapter each in scripts/locator-check.sh, and a probe for their verification run

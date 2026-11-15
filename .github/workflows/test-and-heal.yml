@@ -8,6 +8,8 @@ name: test-and-heal
 #   - report-defects: the defect-reporter agent writes a report for each REAL_BUG failure, and
 #     scripts/report-defects.sh opens a GitHub issue for it, or comments on the open issue for the same failure.
 # Agents run on the selected engine (Claude Code or OpenCode) via scripts/stage-agents.sh and scripts/run-agent.sh.
+# With app_start_command the jobs start the app themselves (scripts/app-server.sh): the test job and the heal job's
+# verification run with the consumer's APP_ENV, the agents' steps without it.
 #
 #   config ──► test ──(failed)──► triage ──(SELECTOR_DRIFT)──► heal: healer → anti-cheat → pr-writer → PR
 #                                        └─(REAL_BUG)────────► report-defects: defect-reporter → issues
@@ -24,7 +26,23 @@ on:
         type: string
         default: ""
       app_url:
-        description: Base URL of a running, disposable test instance of the app (never production). Exported as APP_URL, BASE_URL and CYPRESS_BASE_URL.
+        description: Base URL of a running, disposable test instance of the app (never production). Exported as APP_URL, BASE_URL and CYPRESS_BASE_URL. With app_start_command, the URL the started app listens on, e.g. http://localhost:4200.
+        type: string
+        default: ""
+      app_start_command:
+        description: Optional command that starts the app in each job that needs it, run with bash from the repository root (e.g. "npm run start"). The test job and the heal job's verification run get it with APP_ENV, the agents' steps without it; it is stopped afterwards. Needs app_url. Empty means the app is not started here.
+        type: string
+        default: ""
+      app_ready_url:
+        description: URL that answers once the app started by app_start_command is up (HTTP 2xx, 3xx or 400-403 counts). Empty uses app_url.
+        type: string
+        default: ""
+      app_ready_timeout:
+        description: Seconds to wait for app_ready_url after app_start_command. The job fails when it never answers.
+        type: number
+        default: 120
+      app_reset_command:
+        description: Optional command that resets the app's test data, run with bash and APP_ENV before every start of app_start_command (e.g. "npm run db:seed").
         type: string
         default: ""
       engine:
@@ -111,7 +129,7 @@ on:
         description: Optional token with read access to agentic-qa-platform (only needed if it is private).
         required: false
       APP_ENV:
-        description: Optional. The app's own variables for the test runs, one KEY=value per line (e.g. its API keys). Loaded only into test runs, never into agent steps. Use repository secrets; secrets of a GitHub Environment aren't visible to reusable workflows.
+        description: Optional. The app's own variables for the test runs, one KEY=value per line (e.g. its API keys). Loaded only into test runs (with app_start_command, into the app started for them and into app_reset_command), never into agent steps. Use repository secrets; secrets of a GitHub Environment aren't visible to reusable workflows.
         required: false
     outputs:
       failed:
@@ -155,6 +173,14 @@ jobs:
       TEST_DIR: ${{ inputs.test_dir || needs.config.outputs.default_test_dir }}
       APP_URL: ${{ inputs.app_url }}
     steps:
+      - name: Check the app inputs
+        if: inputs.app_start_command != ''
+        env:
+          APP_READY_TIMEOUT: ${{ inputs.app_ready_timeout }}
+        run: |
+          [ -n "$APP_URL" ] || { echo "::error::app_start_command needs app_url: the base URL the started app listens on, where the agents and the tests go."; exit 1; }
+          [[ "$APP_READY_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || { echo "::error::app_ready_timeout must be a positive number of seconds, got '$APP_READY_TIMEOUT'."; exit 1; }
+
       - name: Checkout the commit under test
         uses: actions/checkout@v7
         with:
@@ -245,6 +271,22 @@ jobs:
           APP_ENV: ${{ secrets.APP_ENV }}
         run: bash .agentic-qa/scripts/load-app-env.sh
 
+      # The app, when the caller sets app_start_command: this job runs no agent, so the app gets the APP_ENV values
+      # loaded above, as does app_reset_command. Stopped again after the run.
+      - name: Reset the app's data
+        if: inputs.app_start_command != '' && inputs.app_reset_command != ''
+        env:
+          APP_RESET_COMMAND: ${{ inputs.app_reset_command }}
+        run: bash -c "$APP_RESET_COMMAND"
+
+      - name: Start the app (with APP_ENV)
+        if: inputs.app_start_command != ''
+        env:
+          APP_START_COMMAND: ${{ inputs.app_start_command }}
+          APP_READY_URL: ${{ inputs.app_ready_url || inputs.app_url }}
+          APP_READY_TIMEOUT: ${{ inputs.app_ready_timeout }}
+        run: bash .agentic-qa/scripts/app-server.sh start
+
       - name: Run tests
         id: run
         continue-on-error: true
@@ -259,6 +301,10 @@ jobs:
           if [ -n "$APP_URL" ]; then export BASE_URL="$APP_URL" CYPRESS_BASE_URL="$APP_URL"; fi
           echo "+ $RUN_CMD"
           bash -c "$RUN_CMD"
+
+      - name: Stop the app
+        if: always() && inputs.app_start_command != ''
+        run: bash .agentic-qa/scripts/app-server.sh stop
 
       - name: Test results summary
         if: always()
@@ -476,6 +522,24 @@ jobs:
         if: steps.parse.outputs.count != '0'
         run: bash "$PLATFORM_DIR/scripts/stage-agents.sh"
 
+      # The app for the triage agent's re-run of a failing test, when the caller sets app_start_command: without
+      # APP_ENV, as the agents' own runs always are (an agent of the same user could read a running process's
+      # environment). app_reset_command runs before it, as a workflow step. Stopped again after the agent.
+      - name: Reset the app's data
+        if: steps.parse.outputs.count != '0' && inputs.app_start_command != '' && inputs.app_reset_command != ''
+        env:
+          APP_ENV: ${{ secrets.APP_ENV }}
+          APP_RESET_COMMAND: ${{ inputs.app_reset_command }}
+        run: bash "$PLATFORM_DIR/scripts/load-app-env.sh" -- bash -c "$APP_RESET_COMMAND"
+
+      - name: Start the app for the triage agent
+        if: steps.parse.outputs.count != '0' && inputs.app_start_command != ''
+        env:
+          APP_START_COMMAND: ${{ inputs.app_start_command }}
+          APP_READY_URL: ${{ inputs.app_ready_url || inputs.app_url }}
+          APP_READY_TIMEOUT: ${{ inputs.app_ready_timeout }}
+        run: bash "$PLATFORM_DIR/scripts/app-server.sh" start
+
       - name: Triage (triage agent)
         id: triage
         if: steps.parse.outputs.count != '0'
@@ -500,6 +564,10 @@ jobs:
             echo "real_bugs=$bugs"
           } >> "$GITHUB_OUTPUT"
           echo "SELECTOR_DRIFT items: $drift (heal), REAL_BUG items: $bugs (report-defects)"
+
+      - name: Stop the app
+        if: always() && inputs.app_start_command != ''
+        run: bash "$PLATFORM_DIR/scripts/app-server.sh" stop
 
       # heal and report-defects run only after this job succeeded, and only on what results/triage.json classifies.
       # Without a triage result they would just be skipped, so the job fails here and says why: nothing to triage,
@@ -708,6 +776,24 @@ jobs:
           echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "PLATFORM_SHA=$(git -C "$PLATFORM_DIR" rev-parse HEAD)" >> "$GITHUB_ENV"
 
+      # The app for the healer, when the caller sets app_start_command: without APP_ENV, as the agents' own runs
+      # always are (an agent of the same user could read a running process's environment). app_reset_command runs
+      # before it, as a workflow step. Stopped again before the verification run, which gets a start of its own.
+      - name: Reset the app's data
+        if: inputs.app_start_command != '' && inputs.app_reset_command != ''
+        env:
+          APP_ENV: ${{ secrets.APP_ENV }}
+          APP_RESET_COMMAND: ${{ inputs.app_reset_command }}
+        run: bash "$PLATFORM_DIR/scripts/load-app-env.sh" -- bash -c "$APP_RESET_COMMAND"
+
+      - name: Start the app for the healer
+        if: inputs.app_start_command != ''
+        env:
+          APP_START_COMMAND: ${{ inputs.app_start_command }}
+          APP_READY_URL: ${{ inputs.app_ready_url || inputs.app_url }}
+          APP_READY_TIMEOUT: ${{ inputs.app_ready_timeout }}
+        run: bash "$PLATFORM_DIR/scripts/app-server.sh" start
+
       - name: Heal selector drift (healer agent)
         id: heal
         env:
@@ -723,6 +809,10 @@ jobs:
             results/heal-report.json as described in your instructions. Test dir: ${{ env.TEST_DIR }}. Framework config:
             .agentic-qa/frameworks/${{ inputs.framework }}.json. App URL: ${{ inputs.app_url || 'not provided' }}.
         run: bash "$PLATFORM_DIR/scripts/run-agent.sh"
+
+      - name: Stop the app the healer used
+        if: always() && inputs.app_start_command != ''
+        run: bash "$PLATFORM_DIR/scripts/app-server.sh" stop
 
       - name: Detect test changes
         id: changes
@@ -750,6 +840,24 @@ jobs:
       # step only, so the healed suite also runs against the app as the test job ran it. It runs before anti-cheat, so
       # anti-cheat also checks any file it writes. Its result goes to the job summary and the PR writer; it doesn't
       # block the pull request.
+      # The verification run's app: the data reset, then the app with APP_ENV, as the test job ran it. No agent
+      # runs again until it is stopped (tests/run-tests.sh checks the workflows for that).
+      - name: Reset the app's data for the verification run
+        if: steps.changes.outputs.changed == 'true' && inputs.app_start_command != '' && inputs.app_reset_command != ''
+        env:
+          APP_ENV: ${{ secrets.APP_ENV }}
+          APP_RESET_COMMAND: ${{ inputs.app_reset_command }}
+        run: bash "$PLATFORM_DIR/scripts/load-app-env.sh" -- bash -c "$APP_RESET_COMMAND"
+
+      - name: Start the app for the verification run (with APP_ENV)
+        if: steps.changes.outputs.changed == 'true' && inputs.app_start_command != ''
+        env:
+          APP_ENV: ${{ secrets.APP_ENV }}
+          APP_START_COMMAND: ${{ inputs.app_start_command }}
+          APP_READY_URL: ${{ inputs.app_ready_url || inputs.app_url }}
+          APP_READY_TIMEOUT: ${{ inputs.app_ready_timeout }}
+        run: bash "$PLATFORM_DIR/scripts/load-app-env.sh" -- bash "$PLATFORM_DIR/scripts/app-server.sh" start
+
       - name: Verify healed tests
         id: verify
         if: steps.changes.outputs.changed == 'true'
@@ -774,6 +882,11 @@ jobs:
           if [ -n "$LOCATOR_PROBE" ]; then export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require $LOCATOR_PROBE"; fi
           echo "+ $RUN_CMD"
           bash "$PLATFORM_DIR/scripts/load-app-env.sh" -- bash -c "$RUN_CMD"
+
+      # Before the pr-writer: the app with APP_ENV must be gone before any agent runs again.
+      - name: Stop the app
+        if: always() && inputs.app_start_command != ''
+        run: bash "$PLATFORM_DIR/scripts/app-server.sh" stop
 
       - name: Verification results
         if: always() && steps.verify.outcome != 'skipped'

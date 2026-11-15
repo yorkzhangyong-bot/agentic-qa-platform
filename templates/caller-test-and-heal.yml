@@ -22,7 +22,16 @@ jobs:
     with:
       framework: playwright # playwright | cypress | selenium
       test_dir: tests
-      app_url: ${{ vars.APP_URL }}
+      app_url: ${{ vars.APP_URL }}   # with app_start_command: the URL the started app listens on, e.g. http://localhost:4200
+      # To start the app in the jobs (when nothing serves it at app_url): the command, the URL that answers once it is
+      # up (default app_url), and a reset of the test data before every start if the app keeps state in a database
+      # or files. The test run and the heal job's verification run get the app with APP_ENV; the agents get it
+      # without. With Playwright set reuseExistingServer: true in the webServer config, so `npx playwright test`
+      # reuses the running app instead of refusing the busy port. See "Starting the app in the workflow" in the README.
+      # app_start_command: npm run start
+      # app_ready_url: http://localhost:4200/
+      # app_ready_timeout: 120
+      # app_reset_command: npm run db:seed
       # engine: opencode    # default claude; opencode needs one of the provider keys below
       # report_defects: false             # default true: a GitHub issue per REAL_BUG failure
       # defect_assignees: your-github-login  # comma-separated logins for new defect issues

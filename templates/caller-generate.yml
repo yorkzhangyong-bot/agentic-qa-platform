@@ -13,9 +13,18 @@ jobs:
     permissions: { contents: write, pull-requests: write, issues: read }
     with:
       framework: playwright # playwright | cypress | selenium
-      app_url: ${{ vars.APP_URL }}
+      app_url: ${{ vars.APP_URL }}   # with app_start_command: the URL the started app listens on, e.g. http://localhost:4200
       issue_number: ${{ github.event.issue.number }}
       spec_path: ${{ inputs.spec_path }}
+      # To start the app in the job (when nothing serves it at app_url): the command, the URL that answers once it is
+      # up (default app_url), and a reset of the test data before every start if the app keeps state in a database
+      # or files. The agents explore the app without APP_ENV; the test run gets a fresh start with it. With
+      # Playwright set reuseExistingServer: true in the webServer config, so `npx playwright test` reuses the
+      # running app instead of refusing the busy port. See "Starting the app in the workflow" in the README.
+      # app_start_command: npm run start
+      # app_ready_url: http://localhost:4200/
+      # app_ready_timeout: 120
+      # app_reset_command: npm run db:seed
       # engine: opencode    # default claude; opencode needs one of the provider keys below
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

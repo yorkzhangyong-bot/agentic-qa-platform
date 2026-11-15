@@ -53,6 +53,15 @@
 #                    must fail naming those lines and load nothing. No value may be printed outside ::add-mask::.
 #                    Also: CRLF, empty values, % in masks, -- COMMAND, --check, and a guard that no agent step and
 #                    no job-wide env in the workflows gets APP_ENV.
+#   app-server.sh    Stub apps (tests/app-server/app.py) on a free port: start waits until the URL answers (a 401
+#                    counts, a 404 doesn't), leaves the app running, and fails at once when the command exits, after
+#                    the timeout when the app never answers (stopping it again), when something already answers at
+#                    the URL, or when the app is already running; stop ends the app's whole process group, waits
+#                    until the URL no longer answers, prints the end of the log and deletes it, does nothing without
+#                    an app, and fails when something still answers afterwards. APP_ENV reaches the app through
+#                    load-app-env.sh --, APP_ENV itself doesn't. Usage errors. And a guard on the workflows: no agent
+#                    step runs while an app started with APP_ENV is up, every start runs only with app_start_command
+#                    and has a stop that runs after a failure too. Skipped on Windows (needs process groups and curl).
 #   evals/triage/run-eval.py  --check accepts evals/triage/cases.jsonl and lists what hide mode deletes; it rejects
 #                    a bad label and a workspace file that gives an answer away. Runs with a stub engine (every
 #                    failure SELECTOR_DRIFT, 3 cases x 2 runs) must report the expected scores, the CI prompt, the
@@ -563,6 +572,10 @@ if engine == "claude":
     deny = json.loads(read(root / "settings" / "claude-settings.json"))["permissions"]["deny"]
     for char in METACHARACTERS:  # deny rules win over allow rules in Claude Code, in any order
         expect(f"Bash(*{char}*)" in deny, f"claude-settings.json: no deny rule Bash(*{char!r}*)")
+    # /proc/<pid>/environ shows a process's environment to every process of the same user: the Read rule covers
+    # Read, Grep and Glob and the file commands Claude Code knows in Bash; the Bash rules every command naming /proc.
+    for rule in ("Read(//proc/**)", "Bash(*/proc/*)", "Bash(* /proc)"):
+        expect(rule in deny, f"claude-settings.json: no deny rule {rule}")
     mcp = json.loads(read(scratch / ".mcp.json"))
     expect(mcp["mcpServers"]["browser"]["args"][0] == "@playwright/mcp@9.9.9", f".mcp.json is not pinned: {mcp}")
 else:
@@ -598,6 +611,18 @@ else:
     for char in METACHARACTERS:  # the last matching rule wins in OpenCode: these must come after every allow rule
         expect(bash.get(f"*{char}*") == "deny" and list(bash).index(f"*{char}*") > last_allow,
                f"bash: *{char!r}* must be denied after every allow rule")
+    # /proc/<pid>/environ shows a process's environment to every process of the same user. The read and glob rules
+    # come after their catch-all, the bash rules after every allow rule (the last matching rule wins). OpenCode
+    # matches a read rule against the path relative to the project directory (../../proc/self/environ), so the
+    # pattern starts with "*", not "/".
+    for key in ("read", "glob"):
+        rules = permission.get(key) or {}
+        order = list(rules) if isinstance(rules, dict) else []
+        expect("*" in order and rules.get("*/proc/*") == "deny" and order.index("*/proc/*") > order.index("*"),
+               f"{key}: */proc/* must be denied after the catch-all rule: {rules}")
+    for pattern in ("*/proc/*", "* /proc"):
+        expect(bash.get(pattern) == "deny" and list(bash).index(pattern) > last_allow,
+               f"bash: {pattern} must be denied after every allow rule")
     expect(permission["webfetch"] == "deny", "webfetch must be denied")
     # OpenCode's default for paths outside the workspace is "ask", and `opencode run` rejects every such request,
     # which ends the run. A deny refuses the call and the agent carries on.
@@ -1212,6 +1237,213 @@ then
   ok "agents-never-get-app-env"
 else
   bad "agents-never-get-app-env" "$(cat "$work/app-env-guard.log")"
+fi
+
+echo
+echo "app-server.sh"
+# Stub apps (tests/app-server/app.py) on a free port, each started with the script and stopped again. Needs the
+# process groups and the curl of a Linux runner.
+if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* || "$(uname -s)" == CYGWIN* ]] || ! command -v curl > /dev/null 2>&1; then
+  echo "  skip  app-server.sh (needs Linux process groups and curl; run it on Linux or in WSL)"
+else
+  app_dir="$work/app-server"
+  app_out="$work/app-server.out"
+  stub="python3 '$root/tests/app-server/app.py'"
+  app_server() {  # app_server [VAR=value]... -- start|stop: run app-server.sh in a clean environment; sets $code
+    local vars=()
+    while [ "$1" != -- ]; do vars+=("$1"); shift; done
+    shift
+    set +e
+    env -u APP_START_COMMAND -u APP_READY_URL -u APP_READY_TIMEOUT -u APP_ENV APP_SERVER_DIR="$app_dir" "${vars[@]}" \
+      bash "$root/scripts/app-server.sh" "$@" > "$app_out" 2>&1
+    code=$?
+    set -e
+  }
+  app_check() {  # app_check <name> <exit> <+present|-absent>...: about the last app_server call
+    local name="$1" want="$2" problems="" item
+    shift 2
+    [ "$code" -eq "$want" ] || problems+="exit $code, want $want"$'\n'
+    for item in "$@"; do
+      if grep -qF -- "${item:1}" "$app_out"; then
+        [ "${item:0:1}" = + ] || problems+="printed: ${item:1}"$'\n'
+      else
+        [ "${item:0:1}" = - ] || problems+="missing: ${item:1}"$'\n'
+      fi
+    done
+    if [ -z "$problems" ]; then ok "$name"; else bad "$name" "$problems$(cat "$app_out")"; fi
+  }
+  free_port() { python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'; }
+  answers() { curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$1/"; }   # answers <port>: something listens there
+  yes_no() { if "$@" 2> /dev/null; then echo yes; else echo no; fi; }
+  left() { find "$app_dir" -mindepth 1 -maxdepth 1 -printf '%f ' 2> /dev/null; }   # the files the script left behind
+  # start waits for the app and leaves it running, with the process it spawned; stop ends both and cleans up.
+  port="$(free_port)"
+  url="http://127.0.0.1:$port/"
+  app_server APP_START_COMMAND="$stub $port --child" APP_READY_URL="$url" APP_READY_TIMEOUT=20 -- start
+  app_check start-answers 0 "+answers (HTTP 200)" "+process group" "+starting the app: $stub" "-last lines"
+  app_pid="$(cat "$app_dir/pid" 2> /dev/null || true)"
+  child_pid="$(sed -n 's/^child //p' "$app_dir/app.log" 2> /dev/null || true)"
+  if [ -n "$app_pid" ] && kill -0 "$app_pid" 2> /dev/null && [ -n "$child_pid" ] && kill -0 "$child_pid" 2> /dev/null \
+     && answers "$port"; then
+    ok "start-leaves-the-app-running"
+  else
+    bad "start-leaves-the-app-running" "app '$app_pid' alive: $(yes_no kill -0 "$app_pid"), child '$child_pid' alive: $(yes_no kill -0 "$child_pid"), answers: $(yes_no answers "$port")"
+  fi
+  app_server APP_START_COMMAND="$stub $port" APP_READY_URL="$url" -- start
+  app_check start-twice-is-refused 1 "+already running" "-starting the app"
+  app_server -- stop
+  app_check stop-stops-the-app 0 "+stopped the app" "+last lines of the app's output" "+listening on $port" "-::error::" "-::warning::"
+  if ! kill -0 "$app_pid" 2> /dev/null && ! kill -0 "$child_pid" 2> /dev/null && ! answers "$port" \
+     && [ ! -e "$app_dir/pid" ] && [ ! -e "$app_dir/app.log" ]; then
+    ok "stop-ends-the-process-group-and-removes-the-log"
+  else
+    bad "stop-ends-the-process-group-and-removes-the-log" "app alive: $(yes_no kill -0 "$app_pid"), child alive: $(yes_no kill -0 "$child_pid"), answers: $(yes_no answers "$port"), left: $(left)"
+  fi
+  app_server -- stop
+  app_check stop-without-an-app 0 "+no app to stop"
+  # Ready by Playwright's rule for a webServer: a login page (401) counts, a 404 doesn't.
+  port="$(free_port)"
+  url="http://127.0.0.1:$port/"
+  app_server APP_START_COMMAND="$stub $port --status 401" APP_READY_URL="$url" -- start
+  app_check ready-on-401 0 "+answers (HTTP 401)"
+  app_server -- stop
+  app_check stop-after-401 0 "+stopped the app"
+  port="$(free_port)"
+  url="http://127.0.0.1:$port/"
+  app_server APP_START_COMMAND="$stub $port --status 404" APP_READY_URL="$url" APP_READY_TIMEOUT=2 -- start
+  app_check not-ready-on-404 1 "+did not answer within 2s" "+last HTTP status: 404" "+last lines of the app's output" \
+    "+listening on $port"
+  if ! answers "$port" && [ ! -e "$app_dir/pid" ] && [ ! -e "$app_dir/app.log" ]; then
+    ok "a-failed-start-stops-the-app"
+  else
+    bad "a-failed-start-stops-the-app" "answers: $(yes_no answers "$port"), left: $(left)"
+  fi
+  # A command that exits fails the start at once, with its output, instead of after the timeout.
+  port="$(free_port)"
+  url="http://127.0.0.1:$port/"
+  started=$SECONDS
+  app_server APP_START_COMMAND="$stub $port --exit 3" APP_READY_URL="$url" APP_READY_TIMEOUT=60 -- start
+  app_check crash-fails-at-once 1 "+exited with code 3" "+stub app crashing" "-did not answer within"
+  if [ $((SECONDS - started)) -lt 20 ]; then
+    ok "crash-fails-before-the-timeout"
+  else
+    bad "crash-fails-before-the-timeout" "took $((SECONDS - started))s"
+  fi
+  # A slow start is waited for.
+  port="$(free_port)"
+  url="http://127.0.0.1:$port/"
+  app_server APP_START_COMMAND="$stub $port --delay 3" APP_READY_URL="$url" APP_READY_TIMEOUT=20 -- start
+  app_check slow-start-is-waited-for 0 "+answers (HTTP 200)"
+  app_server -- stop
+  app_check stop-after-slow-start 0 "+stopped the app"
+  # Nothing else may answer at the URL before the start: the ready check would pass against the wrong server.
+  port="$(free_port)"
+  url="http://127.0.0.1:$port/"
+  python3 "$root/tests/app-server/app.py" "$port" --status 500 > /dev/null 2>&1 &
+  other=$!
+  for _ in $(seq 1 50); do answers "$port" && break; sleep 0.1; done
+  app_server APP_START_COMMAND="$stub $port" APP_READY_URL="$url" -- start
+  app_check start-refuses-a-busy-url 1 "+already answers at $url (HTTP 500)" "-starting the app"
+  kill "$other" 2> /dev/null || true
+  wait "$other" 2> /dev/null || true
+  # After stop nothing may answer any more: here a server in a session of its own outlives the process group.
+  port="$(free_port)"
+  url="http://127.0.0.1:$port/"
+  app_server APP_START_COMMAND="$stub $port --escape" APP_READY_URL="$url" APP_READY_TIMEOUT=20 -- start
+  app_check start-with-an-escaping-server 0 "+answers (HTTP 200)"
+  escaped="$(sed -n 's/^escaped //p' "$app_dir/app.log" 2> /dev/null || true)"
+  app_server -- stop
+  app_check stop-fails-when-something-still-answers 1 "+still answers (HTTP 200)" "+stopped the app"
+  kill "$escaped" 2> /dev/null || true
+  if [ ! -e "$app_dir/pid" ] && [ ! -e "$app_dir/app.log" ]; then
+    ok "a-failed-stop-cleans-up"
+  else
+    bad "a-failed-stop-cleans-up" "left: $(left)"
+  fi
+  # APP_ENV reaches the app through load-app-env.sh --, and APP_ENV itself doesn't.
+  for variable in APP_TOKEN APP_ENV; do
+    port="$(free_port)"
+    url="http://127.0.0.1:$port/"
+    set +e
+    env -u APP_READY_TIMEOUT APP_SERVER_DIR="$app_dir" GITHUB_ACTIONS= APP_ENV='APP_TOKEN=fixture-app-token-3f9e' \
+      APP_START_COMMAND="$stub $port --body-env $variable" APP_READY_URL="$url" \
+      bash "$root/scripts/load-app-env.sh" -- bash "$root/scripts/app-server.sh" start > "$app_out" 2>&1
+    code=$?
+    set -e
+    app_check "start-through-load-app-env-$variable" 0 "+answers (HTTP 200)"
+    body="$(curl -s --max-time 5 "$url")"
+    app_server -- stop
+    app_check "stop-after-load-app-env-$variable" 0 "+stopped the app"
+    if [ "$variable" = APP_TOKEN ]; then want='fixture-app-token-3f9e'; else want='unset'; fi
+    if [ "$body" = "$want" ]; then
+      ok "the-app-sees-$variable-as-$want"
+    else
+      bad "the-app-sees-$variable-as-$want" "the app answered '$body'"
+    fi
+  done
+  # Usage errors.
+  app_server APP_READY_URL="$url" -- start
+  app_check start-needs-a-command 2 "+APP_START_COMMAND is required"
+  app_server APP_START_COMMAND="$stub 1" -- start
+  app_check start-needs-a-url 2 "+APP_READY_URL is required"
+  app_server APP_START_COMMAND="$stub 1" APP_READY_URL="$url" APP_READY_TIMEOUT=soon -- start
+  app_check start-checks-the-timeout 2 "+APP_READY_TIMEOUT must be a positive number"
+  app_server -- restart
+  app_check unknown-mode 2 "+unknown mode"
+fi
+# The workflows: an app started with APP_ENV (in the step, or loaded into $GITHUB_ENV earlier in the job) must be
+# stopped before any agent step; every start runs only with app_start_command and has a stop that runs after a
+# failure too, and no start while the app is up.
+if python3 - "$root/.github/workflows" > "$work/app-server-guard.log" 2>&1 <<'PY'
+import pathlib
+import re
+import sys
+
+problems = []
+starts = 0
+for path in sorted(pathlib.Path(sys.argv[1]).glob("*.yml")):
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith("#")]
+    text = "\n".join(lines) + "\n"
+    if "\njobs:\n" not in text:
+        continue
+    for job in re.split(r"(?m)^  (?=[\w-]+:\s*$)", text.split("\njobs:\n", 1)[1])[1:]:
+        name = job.split(":", 1)[0]
+        where = f"{path.name} {name}"
+        head, _, steps = job.partition("\n    steps:\n")
+        running = secret_app = None  # the step that started the app; the same when it started it with APP_ENV
+        job_env = False              # APP_ENV loaded into $GITHUB_ENV earlier in the job (a job without agents)
+        for step in re.split(r"(?m)^      - ", steps)[1:]:
+            title = step.splitlines()[0]
+            condition = re.search(r"^\s+if: (.*)$", step, re.M)
+            condition = condition.group(1) if condition else ""
+            if "secrets.APP_ENV" in step and re.search(r'load-app-env\.sh"?\s*$', step, re.M):
+                job_env = True
+            action = re.search(r'app-server\.sh"? (start|stop)\b', step)
+            if action and action.group(1) == "start":
+                starts += 1
+                if running:
+                    problems.append(f"{where}: '{title}' starts the app while '{running}' has not stopped it")
+                running = title
+                secret_app = title if "secrets.APP_ENV" in step or job_env else None
+                if "inputs.app_start_command != ''" not in condition:
+                    problems.append(f"{where}: '{title}' must run only if inputs.app_start_command != ''")
+            elif action:
+                if "always()" not in condition:
+                    problems.append(f"{where}: '{title}' must run with if: always(), so the app is stopped after a failure too")
+                running = secret_app = None
+            elif "run-agent.sh" in step and secret_app:
+                problems.append(f"{where}: the agent step '{title}' runs while the app '{secret_app}' started with APP_ENV is up")
+        if running:
+            problems.append(f"{where}: '{running}' starts the app, but no later step stops it")
+if not starts:
+    problems.append("no workflow step starts the app with app-server.sh")
+print("\n".join(problems))
+sys.exit(1 if problems else 0)
+PY
+then
+  ok "no-agent-step-while-the-app-has-app-env"
+else
+  bad "no-agent-step-while-the-app-has-app-env" "$(cat "$work/app-server-guard.log")"
 fi
 
 echo
