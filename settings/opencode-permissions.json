@@ -6,6 +6,14 @@
       "results/**": "allow",
       "PR_BODY.md": "allow"
     },
+    "read": {
+      "*": "allow",
+      "*/proc/*": "deny"
+    },
+    "glob": {
+      "*": "allow",
+      "*/proc/*": "deny"
+    },
     "bash": {
       "*": "deny",
       "npx playwright test *": "allow",
@@ -27,6 +35,8 @@
       "printenv *": "deny",
       "nc *": "deny",
       "ssh *": "deny",
+      "*/proc/*": "deny",
+      "* /proc": "deny",
       "*&*": "deny",
       "*|*": "deny",
       "*;*": "deny",

@@ -92,7 +92,10 @@ test.describe('Checkout coupons', () => {
 
 ## Procedure
 
-1. Read the plan, `playwright.config.*` and two or three existing specs, and match their style.
+1. Read the plan, `playwright.config.*` and two or three existing specs, and match their style. Then open the live
+   app: `browser_navigate` to `$APP_URL` and `browser_snapshot`, before you write anything, so you work from the
+   real pages. The app is already running; a test run you start reuses it. If it doesn't answer, say so in your
+   summary and in `results/generate-report.json`, and don't keep retrying.
 2. For each scenario, in order:
    1. **Explore.**
       - `browser_navigate` to the page under `$APP_URL`, reproduce the preconditions, then `browser_snapshot`.

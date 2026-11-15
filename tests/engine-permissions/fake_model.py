@@ -12,6 +12,8 @@ STEPS is one step, or a JSON array of steps. A step is a shell command, or:
   write:<absolute path>  the write tool, writing "{}" to that file
   read:<absolute path>   the read tool, reading that file
   grep:<absolute path>   the grep tool, searching that file or folder for "canary"
+  glob:<absolute path>   the glob tool, looking for "*environ*" under that folder
+  globpattern:<pattern>  the glob tool with that pattern alone, no folder
 
 Usage: python3 fake_model.py STEPS RECORD PORT_FILE
 The server picks a free port on 127.0.0.1, writes it to PORT_FILE and serves until it is killed.
@@ -34,6 +36,10 @@ def calls(step):
         return ("Read", {"file_path": path}), ("read", {"filePath": path})
     if kind == "grep" and path:
         return ("Grep", {"pattern": "canary", "path": path}), ("grep", {"pattern": "canary", "path": path})
+    if kind == "glob" and path:
+        return ("Glob", {"pattern": "*environ*", "path": path}), ("glob", {"pattern": "*environ*", "path": path})
+    if kind == "globpattern" and path:
+        return ("Glob", {"pattern": path}), ("glob", {"pattern": path})
     return (("Bash", {"command": step, "description": "Run the command under test"}),
             ("bash", {"command": step, "description": "Run the command under test"}))
 

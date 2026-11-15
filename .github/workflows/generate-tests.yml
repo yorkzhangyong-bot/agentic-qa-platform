@@ -4,6 +4,8 @@ name: generate-tests
 # agent writes results/plan.md, the generator agent implements it against the live app, the tests run, anti-cheat.sh
 # checks the diff, and the pr-writer agent describes the result in a pull request on auto-generate/<run_id>.
 # Agents run on the selected engine (Claude Code or OpenCode) via scripts/stage-agents.sh and scripts/run-agent.sh.
+# With app_start_command the job starts the app itself (scripts/app-server.sh): for the agents without the
+# consumer's APP_ENV, and once more with it for the test run after generation.
 
 on:
   workflow_call:
@@ -17,7 +19,23 @@ on:
         type: string
         default: ""
       app_url:
-        description: Base URL of a running, disposable test instance of the app (never production), explored by the agents through the browser MCP server.
+        description: Base URL of a running, disposable test instance of the app (never production), explored by the agents through the browser MCP server. With app_start_command, the URL the started app listens on, e.g. http://localhost:4200.
+        type: string
+        default: ""
+      app_start_command:
+        description: Optional command that starts the app in this job, run with bash from the repository root (e.g. "npm run start"). Started before the agents without APP_ENV, and again with APP_ENV for the test run after generation; stopped afterwards. Needs app_url. Empty means the app is not started here.
+        type: string
+        default: ""
+      app_ready_url:
+        description: URL that answers once the app started by app_start_command is up (HTTP 2xx, 3xx or 400-403 counts). Empty uses app_url.
+        type: string
+        default: ""
+      app_ready_timeout:
+        description: Seconds to wait for app_ready_url after app_start_command. The job fails when it never answers.
+        type: number
+        default: 120
+      app_reset_command:
+        description: Optional command that resets the app's test data, run with bash and APP_ENV before every start of app_start_command (e.g. "npm run db:seed").
         type: string
         default: ""
       engine:
@@ -104,7 +122,7 @@ on:
         description: Optional token with read access to agentic-qa-platform (only needed if it is private).
         required: false
       APP_ENV:
-        description: Optional. The app's own variables for the test runs, one KEY=value per line (e.g. its API keys). Loaded only into the test run after generation, never into agent steps. Use repository secrets; secrets of a GitHub Environment aren't visible to reusable workflows.
+        description: Optional. The app's own variables for the test runs, one KEY=value per line (e.g. its API keys). Loaded only into the test run after generation (with app_start_command, into the app started for that run and into app_reset_command), never into agent steps. Use repository secrets; secrets of a GitHub Environment aren't visible to reusable workflows.
         required: false
     outputs:
       pr_url:
@@ -187,6 +205,14 @@ jobs:
               ;;
           esac
           echo "Agent engine: $ENGINE"
+
+      - name: Check the app inputs
+        if: inputs.app_start_command != ''
+        env:
+          APP_READY_TIMEOUT: ${{ inputs.app_ready_timeout }}
+        run: |
+          [ -n "$APP_URL" ] || { echo "::error::app_start_command needs app_url: the base URL the started app listens on, where the agents and the tests go."; exit 1; }
+          [[ "$APP_READY_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || { echo "::error::app_ready_timeout must be a positive number of seconds, got '$APP_READY_TIMEOUT'."; exit 1; }
 
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -313,6 +339,25 @@ jobs:
           echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "PLATFORM_SHA=$(git -C "$PLATFORM_DIR" rev-parse HEAD)" >> "$GITHUB_ENV"
 
+      # The app for the agents, when the caller sets app_start_command: started here without the consumer's APP_ENV,
+      # because an agent of the same user could read a running process's environment (/proc/<pid>/environ), and
+      # stopped again before the test run, which gets a start of its own with APP_ENV. See "Starting the app in the
+      # workflow" in the README. app_reset_command runs before every start, as a workflow step.
+      - name: Reset the app's data
+        if: inputs.app_start_command != '' && inputs.app_reset_command != ''
+        env:
+          APP_ENV: ${{ secrets.APP_ENV }}
+          APP_RESET_COMMAND: ${{ inputs.app_reset_command }}
+        run: bash "$PLATFORM_DIR/scripts/load-app-env.sh" -- bash -c "$APP_RESET_COMMAND"
+
+      - name: Start the app for the agents
+        if: inputs.app_start_command != ''
+        env:
+          APP_START_COMMAND: ${{ inputs.app_start_command }}
+          APP_READY_URL: ${{ inputs.app_ready_url || inputs.app_url }}
+          APP_READY_TIMEOUT: ${{ inputs.app_ready_timeout }}
+        run: bash "$PLATFORM_DIR/scripts/app-server.sh" start
+
       - name: Plan (planner agent)
         env:
           ANTHROPIC_API_KEY: ${{ inputs.engine == 'claude' && secrets.ANTHROPIC_API_KEY || '' }}
@@ -346,6 +391,28 @@ jobs:
             echo "::warning::The generator agent did not write results/generate-report.json; the PR description will rely on the diff."
           fi
 
+      - name: Stop the app the agents used
+        if: always() && inputs.app_start_command != ''
+        run: bash "$PLATFORM_DIR/scripts/app-server.sh" stop
+
+      # The app for the test run: the data reset, then the app with APP_ENV, as the consumer's own test job runs it.
+      # No agent runs again until it is stopped (tests/run-tests.sh checks the workflows for that).
+      - name: Reset the app's data for the test run
+        if: inputs.app_start_command != '' && inputs.app_reset_command != ''
+        env:
+          APP_ENV: ${{ secrets.APP_ENV }}
+          APP_RESET_COMMAND: ${{ inputs.app_reset_command }}
+        run: bash "$PLATFORM_DIR/scripts/load-app-env.sh" -- bash -c "$APP_RESET_COMMAND"
+
+      - name: Start the app for the test run (with APP_ENV)
+        if: inputs.app_start_command != ''
+        env:
+          APP_ENV: ${{ secrets.APP_ENV }}
+          APP_START_COMMAND: ${{ inputs.app_start_command }}
+          APP_READY_URL: ${{ inputs.app_ready_url || inputs.app_url }}
+          APP_READY_TIMEOUT: ${{ inputs.app_ready_timeout }}
+        run: bash "$PLATFORM_DIR/scripts/load-app-env.sh" -- bash "$PLATFORM_DIR/scripts/app-server.sh" start
+
       - name: Run tests
         id: run
         continue-on-error: true
@@ -365,6 +432,11 @@ jobs:
           if [ -n "$APP_URL" ]; then export BASE_URL="$APP_URL" CYPRESS_BASE_URL="$APP_URL"; fi
           echo "+ $RUN_CMD"
           bash "$PLATFORM_DIR/scripts/load-app-env.sh" -- bash -c "$RUN_CMD"
+
+      # Before the pr-writer: the app with APP_ENV must be gone before any agent runs again.
+      - name: Stop the app
+        if: always() && inputs.app_start_command != ''
+        run: bash "$PLATFORM_DIR/scripts/app-server.sh" stop
 
       - name: Test results summary
         if: always()
