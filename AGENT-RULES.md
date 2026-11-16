@@ -43,12 +43,28 @@ conflicts with them. If a task can only be done by breaking a rule, stop and rep
    - creates the state it needs through the UI, an API or fixtures;
    - never relies on another test or on execution order;
    - uses unique test data where collisions are possible.
-5. **No fixed sleeps.** Never use `page.waitForTimeout()`, `cy.wait(<ms>)`, `Thread.sleep()` or timer-based
+5. **Plan every requirement thoroughly.** For every requirement, plan the obvious case, then ask these questions
+   and add a scenario for each that applies:
+   1. **Other actors:** what does a signed-out visitor see, and a signed-in user who does *not* own the item?
+      Check both what they must see and what they must not.
+   2. **After a change:** when something is created, edited or deleted, verify *all* of its parts afterwards
+      (not only the field you changed), on the page where users would see the result.
+   3. **Every surface:** if a rule applies to a type of page or component (lists, editors, tabs, dialogs), cover
+      each instance, not only the first one found while exploring.
+   4. **Unhappy path:** invalid, empty, duplicate or forbidden input, with the exact status or message the spec
+      defines.
+   5. **Non-functional rules** in the spec (performance, security, what the page must not load or send) get a
+      scenario on the page where they apply.
+
+   The plan lists, per requirement, which of the five questions produced a scenario and which were judged not
+   applicable, so gaps are visible. The generator implements every scenario they produced, including what a user
+   must *not* see.
+6. **No fixed sleeps.** Never use `page.waitForTimeout()`, `cy.wait(<ms>)`, `Thread.sleep()` or timer-based
    delays. Wait for a condition instead:
    - Playwright: auto-waiting and web-first assertions.
    - Cypress: retry-ability, and `cy.intercept()` + `cy.wait('@alias')`.
    - Selenium: `WebDriverWait` + `ExpectedConditions`.
-6. **Assert on the result of this action, never on state left over from before it.** An assertion that the page
+7. **Assert on the result of this action, never on state left over from before it.** An assertion that the page
    already satisfied before the action proves nothing about the action, and passes or fails by timing.
    - When an action sends a request, wait for the server's response before you assert:
      - Playwright: `page.waitForResponse(…)`, started before the click (`const response = page.waitForResponse(…)`,
@@ -66,17 +82,17 @@ conflicts with them. If a task can only be done by breaking a rule, stop and rep
      `cy.wait('@post').its('response.statusCode').should('eq', 422)`, then the text assertion. Selenium: read the
      status text before the click, click, `wait.until(ExpectedConditions.not(ExpectedConditions.textToBe(STATUS,
      before)))`, then assert "Rejected".
-7. **Always re-run tests after changes.** Nothing is done until the affected tests have run and passed. A healed
+8. **Always re-run tests after changes.** Nothing is done until the affected tests have run and passed. A healed
    test must pass 3 runs in a row.
-8. **Stop and report real bugs.** If a failure looks like an application bug, don't change the test to make it
+9. **Stop and report real bugs.** If a failure looks like an application bug, don't change the test to make it
    pass. Record the evidence and move on. Signs of an application bug:
    - a wrong value;
    - a missing feature or element;
    - an error page or failed request;
    - a console error;
    - behaviour that contradicts the spec.
-9. **End with a clear summary of what changed and why.** List the files you touched, what changed in each
-   (before → after), how you verified it, and any open questions.
+10. **End with a clear summary of what changed and why.** List the files you touched, what changed in each
+    (before → after), how you verified it, and any open questions.
 
 ## Working agreements
 

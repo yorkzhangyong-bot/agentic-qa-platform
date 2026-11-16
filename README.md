@@ -980,6 +980,12 @@ These are **not** detected by the scripts and must be checked by the reviewer (t
     hold the rule "Assert on the result of this action, never on state left over from before it", with the
     framework's response wait (`page.waitForResponse`, `cy.intercept` + `cy.wait('@…')`, `WebDriverWait`), the
     status example and a bad and a good example; and the check must notice a prompt the rule was removed from;
+  - the scenario-questions rule: `AGENT-RULES.md` and the planner prompts of every framework must hold the rule
+    "For every requirement, plan the obvious case, then ask these questions and add a scenario for each that
+    applies" with its five questions (other actors, after a change, every surface, unhappy path, non-functional
+    rules) and the per-requirement listing of which produced a scenario; the planners also the plan's "Scenario
+    questions per requirement" table and a bad and a good plan, the generator prompts the five questions; and the
+    check must notice a prompt the rule was removed from;
   - `app-server.sh`, with `tests/app-server/app.py` as the app: a start must wait until the URL answers (a 401
     counts, a 404 doesn't) and leave the app running with the process it spawned; a command that exits, an app
     that never answers, a URL something already answers at, and a second start must fail, with the app's output;

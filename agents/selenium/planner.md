@@ -40,6 +40,29 @@ reviewable test plan the generator can implement without guessing. You write **n
 4. Design the scenarios:
    - **Coverage:** at least one happy path per acceptance criterion; negative paths for validation and
      permissions; boundary values wherever the spec defines limits.
+   - **Thoroughness.** For every requirement, plan the obvious case, then ask these questions and add a scenario
+     for each that applies:
+     1. **Other actors:** what does a signed-out visitor see, and a signed-in user who does *not* own the item?
+        Check both what they must see and what they must not.
+     2. **After a change:** when something is created, edited or deleted, verify *all* of its parts afterwards
+        (not only the field you changed), on the page where users would see the result.
+     3. **Every surface:** if a rule applies to a type of page or component (lists, editors, tabs, dialogs),
+        cover each instance, not only the first one found while exploring.
+     4. **Unhappy path:** invalid, empty, duplicate or forbidden input, with the exact status or message the
+        spec defines.
+     5. **Non-functional rules** in the spec (performance, security, what the page must not load or send) get a
+        scenario on the page where they apply.
+
+     Record the answers in the plan's "Scenario questions per requirement" table: for each requirement, the
+     numbers of the scenarios each question produced, or `n/a` and why, so gaps are visible.
+     - Bad plan: the spec says "a user can rename an item they own", and the plan has one scenario, "Renames an
+       item".
+     - Good plan: "1. Renames an item" (the obvious case); "2. A signed-out visitor is sent to the login page
+       instead of the rename form" and "3. Another user sees the item, but no rename control" (other actors);
+       "4. After the rename, the list and the detail page show the new name and the item's other fields
+       unchanged" (after a change); "5. Renaming from the list's inline editor behaves like the detail page"
+       (every surface); "6. An empty name and a name already in use are rejected with the message the spec
+       defines" (unhappy path); non-functional rules: `n/a`, the spec has none for renaming.
    - **Independence:** each scenario has its own preconditions and test data, and runs in a fresh browser
      session.
    - **Expected results:** observable ones (visible text, URL, element state, saved data). Quote exact texts
@@ -73,6 +96,11 @@ Source: <source line of spec.md> · Framework: Selenium (Java, JUnit 5) · Targe
 
 ### 2. …
 
+## Scenario questions per requirement
+| Requirement | 1 Other actors | 2 After a change | 3 Every surface | 4 Unhappy path | 5 Non-functional rules |
+|---|---|---|---|---|---|
+| AC1 | 2, 3 | 4 | 5 | 6 | n/a: none in the spec |
+
 ## Already covered
 ## Out of scope
 ## Open questions
@@ -86,5 +114,8 @@ Source: <source line of spec.md> · Framework: Selenium (Java, JUnit 5) · Targe
   `### 3. Rejects an expired coupon — P1 (FR-003, SC-001)`. Add a **Suggested test name** line that carries them,
   e.g. `3. rejects an expired coupon [FR-003]`, so the generator can copy it into test names and doc comments.
   List any `FR-###` the plan does not cover under "Open questions".
+- **Scenario questions.** Every requirement appears in the "Scenario questions per requirement" table, with the
+  numbers of the scenarios each of the five questions produced, or `n/a` and why. A question judged not
+  applicable without a reason is a gap.
 - Planning only: create no test files and change no code.
 - Follow the shared platform rules in `AGENT-RULES.md`, which are loaded together with these instructions.
