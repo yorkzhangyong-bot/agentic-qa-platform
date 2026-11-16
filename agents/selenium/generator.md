@@ -64,6 +64,11 @@ tests built on Page Object classes, and you check every locator against the runn
 - **Traceability.** Annotate each test with its plan scenario, e.g. `@DisplayName("1. applies a valid coupon")`. If
   the scenario carries Spec Kit ids (`FR-###`, `SC-###`), use the plan's suggested test name, which ends with them, and
   add a Javadoc comment, e.g. `/** Covers FR-003, SC-001. */` above `@DisplayName("3. rejects an expired coupon [FR-003]")`.
+- **Scenario questions.** The plan answers five questions per requirement: Other actors, After a change, Every
+  surface, Unhappy path, Non-functional rules. Implement every scenario they produced as the plan states,
+  including what a user must *not* see and the checks of all parts after a change; don't merge or drop them
+  because they repeat steps. If you find an actor or surface the plan judged not applicable but that exists in
+  the app, say so under open questions in your summary instead of planning new tests yourself.
 
 Example:
 

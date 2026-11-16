@@ -57,6 +57,12 @@
 #                    rule "Assert on the result of this action, never on state left over from before it", with the
 #                    framework's response wait, the status example (422) and a bad and a good example; and the check
 #                    must notice a prompt the rule was removed from.
+#   scenario-questions rule  AGENT-RULES.md and the planner prompts of every framework must hold the rule "For every
+#                    requirement, plan the obvious case, then ask these questions and add a scenario for each that
+#                    applies" with its five questions and the per-requirement listing; the planners also the plan's
+#                    "Scenario questions per requirement" table and a bad and a good plan; the generator prompts the
+#                    five questions. Line breaks inside a sentence don't matter. And the check must notice a prompt
+#                    the rule was removed from.
 #   app-server.sh    Stub apps (tests/app-server/app.py) on a free port: start waits until the URL answers (a 401
 #                    counts, a 404 doesn't), leaves the app running, and fails at once when the command exits, after
 #                    the timeout when the app never answers (stopping it again), when something already answers at
@@ -1457,6 +1463,9 @@ echo "race-free assertions rule (AGENT-RULES.md and the generator and healer pro
 rule_sentence='Assert on the result of this action, never on state left over from before it'
 rule_files=(AGENT-RULES.md agents/playwright/generator.md agents/playwright/healer.md agents/cypress/generator.md
   agents/cypress/healer.md agents/selenium/generator.md agents/selenium/healer.md)
+has_text() {  # has_text <file> <text>: the text is in the file, whatever the line breaks inside it
+  tr -s '[:space:]' ' ' < "$1" | grep -qF -- "$2"
+}
 rule_check() {  # rule_check <root>: lists what is missing from each file; exit 1 if anything is
   local base="$1" problems="" file piece needs
   for file in "${rule_files[@]}"; do
@@ -1467,7 +1476,7 @@ rule_check() {  # rule_check <root>: lists what is missing from each file; exit 
       agents/selenium/*) needs=("WebDriverWait") ;;
     esac
     for piece in "$rule_sentence" "422" "Bad, race-prone" "Good:" "${needs[@]}"; do
-      grep -qF -- "$piece" "$base/$file" || problems+="$file: missing '$piece'"$'\n'
+      has_text "$base/$file" "$piece" || problems+="$file: missing '$piece'"$'\n'
     done
   done
   printf '%s' "$problems"
@@ -1491,6 +1500,51 @@ elif [ "$output" = "agents/cypress/healer.md: missing '$rule_sentence'" ]; then 
   ok "rule-check-notices-a-missing-rule"
 else
   bad "rule-check-notices-a-missing-rule" "$output"
+fi
+
+echo
+echo "scenario-questions rule (AGENT-RULES.md, the planner and generator prompts)"
+# The planners' rule for thorough scenario design: its sentence, its five questions and the per-requirement
+# listing must be in the shared rules and in every planner prompt, the planners must also carry the plan's table
+# and a bad and a good plan, and every generator prompt must name the five questions.
+scenario_sentence='For every requirement, plan the obvious case, then ask these questions and add a scenario for each that applies'
+scenario_questions=("Other actors" "After a change" "Every surface" "Unhappy path" "Non-functional rules")
+scenario_files=(AGENT-RULES.md agents/playwright/planner.md agents/cypress/planner.md agents/selenium/planner.md
+  agents/playwright/generator.md agents/cypress/generator.md agents/selenium/generator.md)
+scenario_check() {  # scenario_check <root>: lists what is missing from each file; exit 1 if anything is
+  local base="$1" problems="" file piece pieces
+  for file in "${scenario_files[@]}"; do
+    case "$file" in
+      AGENT-RULES.md) pieces=("$scenario_sentence" "${scenario_questions[@]}" "not applicable") ;;
+      */planner.md) pieces=("$scenario_sentence" "${scenario_questions[@]}" "not applicable"
+                            "Scenario questions per requirement" "Bad plan" "Good plan") ;;
+      */generator.md) pieces=("${scenario_questions[@]}") ;;
+    esac
+    for piece in "${pieces[@]}"; do
+      has_text "$base/$file" "$piece" || problems+="$file: missing '$piece'"$'\n'
+    done
+  done
+  printf '%s' "$problems"
+  [ -z "$problems" ]
+}
+if output="$(scenario_check "$root")"; then
+  ok "scenario-questions-in-every-prompt"
+else
+  bad "scenario-questions-in-every-prompt" "$output"
+fi
+# The check itself must notice a prompt the rule was removed from: here the sentence's line in the selenium planner.
+scenario_copy="$work/scenario-copy"
+for file in "${scenario_files[@]}"; do
+  mkdir -p "$scenario_copy/$(dirname "$file")"
+  cp "$root/$file" "$scenario_copy/$file"
+done
+grep -vF -- "plan the obvious case" "$root/agents/selenium/planner.md" > "$scenario_copy/agents/selenium/planner.md"
+if output="$(scenario_check "$scenario_copy")"; then
+  bad "scenario-check-notices-a-missing-rule" "passed although the sentence was removed from agents/selenium/planner.md"
+elif [ "$output" = "agents/selenium/planner.md: missing '$scenario_sentence'" ]; then   # $(...) drops the final newline
+  ok "scenario-check-notices-a-missing-rule"
+else
+  bad "scenario-check-notices-a-missing-rule" "$output"
 fi
 
 echo
