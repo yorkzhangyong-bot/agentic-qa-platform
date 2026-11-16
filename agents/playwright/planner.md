@@ -28,7 +28,9 @@ the generator can implement without guessing. You write **no code**.
    - the acceptance criteria, explicit and implied;
    - business and validation rules;
    - roles and permissions;
-   - edge cases.
+   - edge cases;
+   - sections on known, accepted or upstream behaviour ("Known behaviour", "Known issues", "Out of scope"):
+     the tests must assert the documented actual behaviour, not the ideal, so note each item.
 2. Explore the live app before you plan anything. If `$APP_URL` is set, the app is running: walk the pages the
    spec concerns with `browser_navigate` + `browser_snapshot`, and confirm that the screens, labels and flows
    exist as the spec describes. Quote the real labels and texts in the scenarios. Record differences as open
@@ -99,6 +101,11 @@ Source: <source line of spec.md> · Framework: Playwright · Target: tests/<feat
 |---|---|---|---|---|---|
 | AC1 | 2, 3 | 4 | 5 | 6 | n/a: none in the spec |
 
+## Known behaviour from the spec
+| Item | Scenarios affected | What the tests assert |
+|---|---|---|
+| <quoted from the spec's "Known behaviour", "Known issues" or "Out of scope" section>, or none | 3, 4 | the documented behaviour |
+
 ## Already covered
 ## Out of scope
 ## Open questions
@@ -115,5 +122,9 @@ Source: <source line of spec.md> · Framework: Playwright · Target: tests/<feat
 - **Scenario questions.** Every requirement appears in the "Scenario questions per requirement" table, with the
   numbers of the scenarios each of the five questions produced, or `n/a` and why. A question judged not
   applicable without a reason is a gap.
+- **Known behaviour.** If the spec has a section describing known, accepted or upstream behaviour (e.g. "Known
+  behaviour", "Known issues", "Out of scope"), tests must assert the documented actual behaviour, not the ideal.
+  List each such item under "Known behaviour from the spec" with which scenarios it affects, and write those
+  scenarios' expected results from it. Without such a section, write "none" there.
 - Planning only: create no test files and change no code.
 - Follow the shared platform rules in `AGENT-RULES.md`, which are loaded together with these instructions.

@@ -986,6 +986,14 @@ These are **not** detected by the scripts and must be checked by the reviewer (t
     rules) and the per-requirement listing of which produced a scenario; the planners also the plan's "Scenario
     questions per requirement" table and a bad and a good plan, the generator prompts the five questions; and the
     check must notice a prompt the rule was removed from;
+  - the cleanup rule: `AGENT-RULES.md` and the generator and healer prompts of every framework must say that a
+    test registers its cleanup immediately after creation, never relies on the end of the test body for it and
+    never depends on counts, ordering or the first item of a shared list, with the framework's per-test teardown
+    and a bad and a good example;
+  - the known-behaviour rule: `AGENT-RULES.md` and the planner and generator prompts of every framework must say
+    that tests assert the documented actual behaviour of a spec's known-behaviour section, not the ideal, and the
+    planners must carry the plan's "Known behaviour from the spec" table; each check must notice a prompt the
+    rule was removed from;
   - `app-server.sh`, with `tests/app-server/app.py` as the app: a start must wait until the URL answers (a 401
     counts, a 404 doesn't) and leave the app running with the process it spawned; a command that exits, an app
     that never answers, a URL something already answers at, and a second start must fail, with the app's output;

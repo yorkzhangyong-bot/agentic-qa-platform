@@ -63,6 +63,14 @@
 #                    "Scenario questions per requirement" table and a bad and a good plan; the generator prompts the
 #                    five questions. Line breaks inside a sentence don't matter. And the check must notice a prompt
 #                    the rule was removed from.
+#   cleanup rule     AGENT-RULES.md and the generator and healer prompts of every framework must hold the rule that a
+#                    test registers its cleanup immediately after creation, never relies on the end of the test body
+#                    for it and never depends on counts, ordering or the first item of a shared list, with the
+#                    framework's per-test teardown and a bad and a good example.
+#   known-behaviour rule  AGENT-RULES.md and the planner and generator prompts of every framework must hold the rule
+#                    that tests assert the documented actual behaviour of a spec's known-behaviour section, not the
+#                    ideal; the planners also the plan's "Known behaviour from the spec" table. Each check must notice
+#                    a prompt the rule was removed from.
 #   app-server.sh    Stub apps (tests/app-server/app.py) on a free port: start waits until the URL answers (a 401
 #                    counts, a 404 doesn't), leaves the app running, and fails at once when the command exits, after
 #                    the timeout when the app never answers (stopping it again), when something already answers at
@@ -1545,6 +1553,88 @@ elif [ "$output" = "agents/selenium/planner.md: missing '$scenario_sentence'" ];
   ok "scenario-check-notices-a-missing-rule"
 else
   bad "scenario-check-notices-a-missing-rule" "$output"
+fi
+
+echo
+echo "cleanup and known-behaviour rules (AGENT-RULES.md and the agent prompts)"
+# Cleanup: AGENT-RULES.md and every generator and healer prompt must hold the rule's sentences, the framework's
+# per-test teardown and a bad and a good example (data left behind vs cleaned up in the generators, an
+# order-dependent locator vs the test's own data in the healers). Known behaviour: AGENT-RULES.md and every planner
+# and generator prompt must hold the rule and the section names, the planners also the plan's table and what it
+# lists. Each check must notice a prompt the rule was removed from.
+cleanup_sentence='must register its cleanup immediately after creation'
+cleanup_files=(AGENT-RULES.md agents/{playwright,cypress,selenium}/{generator,healer}.md)
+cleanup_check() {  # cleanup_check <root>: lists what is missing from each file; exit 1 if anything is
+  local base="$1" problems="" file piece pieces
+  for file in "${cleanup_files[@]}"; do
+    pieces=("$cleanup_sentence" "Never rely on the end of the test body for cleanup" "counts, ordering or"
+            "A failing test must not make other tests fail")
+    case "$file" in
+      AGENT-RULES.md) pieces+=("test.afterEach" "cy.request" "@AfterEach" "finally") ;;
+      agents/playwright/*) pieces+=("test.afterEach") ;;
+      agents/cypress/*) pieces+=("afterEach" "cy.request") ;;
+      agents/selenium/*) pieces+=("@AfterEach" "finally") ;;
+    esac
+    case "$file" in
+      */generator.md) pieces+=("Bad, leaves data behind" "Good, cleans up") ;;
+      */healer.md) pieces+=("Bad, order-dependent" "Good, own data") ;;
+    esac
+    for piece in "${pieces[@]}"; do
+      has_text "$base/$file" "$piece" || problems+="$file: missing '$piece'"$'\n'
+    done
+  done
+  printf '%s' "$problems"
+  [ -z "$problems" ]
+}
+known_sentence='assert the documented actual behaviour, not the ideal'
+known_files=(AGENT-RULES.md agents/{playwright,cypress,selenium}/{planner,generator}.md)
+known_check() {  # known_check <root>: lists what is missing from each file; exit 1 if anything is
+  local base="$1" problems="" file piece pieces
+  for file in "${known_files[@]}"; do
+    pieces=("$known_sentence" "Known behaviour" "Known issues" "Out of scope")
+    case "$file" in
+      AGENT-RULES.md) pieces+=("which scenarios it affects") ;;
+      */planner.md) pieces+=("which scenarios it affects" "Known behaviour from the spec") ;;
+    esac
+    for piece in "${pieces[@]}"; do
+      has_text "$base/$file" "$piece" || problems+="$file: missing '$piece'"$'\n'
+    done
+  done
+  printf '%s' "$problems"
+  [ -z "$problems" ]
+}
+if output="$(cleanup_check "$root")"; then
+  ok "cleanup-rule-in-every-prompt"
+else
+  bad "cleanup-rule-in-every-prompt" "$output"
+fi
+if output="$(known_check "$root")"; then
+  ok "known-behaviour-rule-in-every-prompt"
+else
+  bad "known-behaviour-rule-in-every-prompt" "$output"
+fi
+# The checks must notice a prompt the rule was removed from: the sentence's line in the cypress generator, and in
+# the selenium planner.
+rules_copy="$work/rules-copy"
+for file in "${cleanup_files[@]}" "${known_files[@]}"; do
+  mkdir -p "$rules_copy/$(dirname "$file")"
+  cp "$root/$file" "$rules_copy/$file"
+done
+grep -vF -- "register its cleanup immediately" "$root/agents/cypress/generator.md" > "$rules_copy/agents/cypress/generator.md"
+grep -vF -- "not the ideal" "$root/agents/selenium/planner.md" > "$rules_copy/agents/selenium/planner.md"
+if output="$(cleanup_check "$rules_copy")"; then
+  bad "cleanup-check-notices-a-missing-rule" "passed although the sentence was removed from agents/cypress/generator.md"
+elif grep -qxF -- "agents/cypress/generator.md: missing '$cleanup_sentence'" <<< "$output"; then
+  ok "cleanup-check-notices-a-missing-rule"
+else
+  bad "cleanup-check-notices-a-missing-rule" "$output"
+fi
+if output="$(known_check "$rules_copy")"; then
+  bad "known-behaviour-check-notices-a-missing-rule" "passed although the sentence was removed from agents/selenium/planner.md"
+elif grep -qxF -- "agents/selenium/planner.md: missing '$known_sentence'" <<< "$output"; then
+  ok "known-behaviour-check-notices-a-missing-rule"
+else
+  bad "known-behaviour-check-notices-a-missing-rule" "$output"
 fi
 
 echo

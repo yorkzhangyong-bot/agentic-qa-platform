@@ -40,6 +40,21 @@ else.
   cy.wait('@postComment');
   cy.get('[data-cy="comment-status"]').should('have.text', 'Rejected');
   ```
+- **Cleanup and isolation.** Every test that creates data (records, posts, comments, users where possible) must
+  register its cleanup immediately after creation, so it runs even if a later assertion fails (an `afterEach`
+  that deletes the recorded ids with `cy.request('DELETE', …)`). When you change the step or custom-command
+  call that creates data, keep that registration right after it. Never rely on the end of the test body for
+  cleanup. Tests must not depend on counts, ordering or "first item" of shared lists unless they created the
+  items in the same test, or filter by data they own: a selector healed to `.first()` or `.eq(0)` on a shared
+  list is not a fix. A failing test must not make other tests fail.
+
+  ```ts
+  // Bad, order-dependent: the drifted row selector healed to the first row of a list other tests fill too
+  cy.get('[data-cy="comment-row"]').first()
+
+  // Good, own data: the row that holds what this test created
+  cy.contains('[data-cy="comment-row"]', text)
+  ```
 
 ## Procedure, for each SELECTOR_DRIFT item
 
