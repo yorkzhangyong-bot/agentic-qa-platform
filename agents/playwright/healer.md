@@ -40,6 +40,21 @@ nothing else.
   await response;
   await expect(page.getByTestId('comment-status')).toHaveText('Rejected');
   ```
+- **Cleanup and isolation.** Every test that creates data (records, posts, comments, users where possible) must
+  register its cleanup immediately after creation, so it runs even if a later assertion fails (a fixture's
+  teardown, or a cleanup list that `test.afterEach` drains). When you change the step or page-object method
+  that creates data, keep that registration right after it. Never rely on the end of the test body for cleanup.
+  Tests must not depend on counts, ordering or "first item" of shared lists unless they created the items in
+  the same test, or filter by data they own: a locator healed to `.first()` or `.nth(0)` on a shared list is
+  not a fix. A failing test must not make other tests fail.
+
+  ```ts
+  // Bad, order-dependent: the drifted row locator healed to the first row of a list other tests fill too
+  const row = page.getByRole('row').first();
+
+  // Good, own data: the row that holds what this test created
+  const row = page.getByRole('row', { name: text });
+  ```
 
 ## Procedure, for each SELECTOR_DRIFT item
 

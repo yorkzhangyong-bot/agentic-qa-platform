@@ -43,7 +43,18 @@ conflicts with them. If a task can only be done by breaking a rule, stop and rep
    - creates the state it needs through the UI, an API or fixtures;
    - never relies on another test or on execution order;
    - uses unique test data where collisions are possible.
-5. **Plan every requirement thoroughly.** For every requirement, plan the obvious case, then ask these questions
+5. **Clean up what you create, and register the cleanup at once.** Every test that creates data (records, posts,
+   comments, users where possible) must register its cleanup immediately after creation, so it runs even if a
+   later assertion fails. Prefer the framework's per-test teardown:
+   - Playwright: a fixture whose teardown deletes what it created (`use()`, then delete), or a per-test cleanup
+     list that `test.afterEach` drains; add to it right after the create.
+   - Cypress: `afterEach` with `cy.request('DELETE', …)` for the ids recorded right after the create.
+   - Selenium: `@AfterEach` for the ids recorded right after the create, or `try`/`finally` around the test body.
+
+   Never rely on the end of the test body for cleanup. Tests must not depend on counts, ordering or "first item"
+   of shared lists unless they created the items in the same test, or filter by data they own. A failing test
+   must not make other tests fail.
+6. **Plan every requirement thoroughly.** For every requirement, plan the obvious case, then ask these questions
    and add a scenario for each that applies:
    1. **Other actors:** what does a signed-out visitor see, and a signed-in user who does *not* own the item?
       Check both what they must see and what they must not.
@@ -59,12 +70,16 @@ conflicts with them. If a task can only be done by breaking a rule, stop and rep
    The plan lists, per requirement, which of the five questions produced a scenario and which were judged not
    applicable, so gaps are visible. The generator implements every scenario they produced, including what a user
    must *not* see.
-6. **No fixed sleeps.** Never use `page.waitForTimeout()`, `cy.wait(<ms>)`, `Thread.sleep()` or timer-based
+7. **Respect the spec's known-behaviour sections.** If the spec has a section describing known, accepted or
+   upstream behaviour (e.g. "Known behaviour", "Known issues", "Out of scope"), tests must assert the documented
+   actual behaviour, not the ideal; the planner lists each such item and which scenarios it affects, and the
+   generator asserts what the section documents there instead of recording a possible bug.
+8. **No fixed sleeps.** Never use `page.waitForTimeout()`, `cy.wait(<ms>)`, `Thread.sleep()` or timer-based
    delays. Wait for a condition instead:
    - Playwright: auto-waiting and web-first assertions.
    - Cypress: retry-ability, and `cy.intercept()` + `cy.wait('@alias')`.
    - Selenium: `WebDriverWait` + `ExpectedConditions`.
-7. **Assert on the result of this action, never on state left over from before it.** An assertion that the page
+9. **Assert on the result of this action, never on state left over from before it.** An assertion that the page
    already satisfied before the action proves nothing about the action, and passes or fails by timing.
    - When an action sends a request, wait for the server's response before you assert:
      - Playwright: `page.waitForResponse(…)`, started before the click (`const response = page.waitForResponse(…)`,
@@ -82,16 +97,16 @@ conflicts with them. If a task can only be done by breaking a rule, stop and rep
      `cy.wait('@post').its('response.statusCode').should('eq', 422)`, then the text assertion. Selenium: read the
      status text before the click, click, `wait.until(ExpectedConditions.not(ExpectedConditions.textToBe(STATUS,
      before)))`, then assert "Rejected".
-8. **Always re-run tests after changes.** Nothing is done until the affected tests have run and passed. A healed
-   test must pass 3 runs in a row.
-9. **Stop and report real bugs.** If a failure looks like an application bug, don't change the test to make it
-   pass. Record the evidence and move on. Signs of an application bug:
-   - a wrong value;
-   - a missing feature or element;
-   - an error page or failed request;
-   - a console error;
-   - behaviour that contradicts the spec.
-10. **End with a clear summary of what changed and why.** List the files you touched, what changed in each
+10. **Always re-run tests after changes.** Nothing is done until the affected tests have run and passed. A healed
+    test must pass 3 runs in a row.
+11. **Stop and report real bugs.** If a failure looks like an application bug, don't change the test to make it
+    pass. Record the evidence and move on. Signs of an application bug:
+    - a wrong value;
+    - a missing feature or element;
+    - an error page or failed request;
+    - a console error;
+    - behaviour that contradicts the spec.
+12. **End with a clear summary of what changed and why.** List the files you touched, what changed in each
     (before → after), how you verified it, and any open questions.
 
 ## Working agreements

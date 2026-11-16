@@ -39,6 +39,22 @@ application, and nothing else.
   wait.until(ExpectedConditions.not(ExpectedConditions.textToBe(COMMENT_STATUS, before)));
   assertEquals("Rejected", driver.findElement(COMMENT_STATUS).getText());
   ```
+- **Cleanup and isolation.** Every test that creates data (records, posts, comments, users where possible) must
+  register its cleanup immediately after creation, so it runs even if a later assertion fails (`@AfterEach` for
+  the recorded ids, or `try`/`finally`). When you change the step or page-object method that creates data,
+  keep that registration right after it. Never rely on the end of the test body for cleanup. Tests must not
+  depend on counts, ordering or "first item" of shared lists unless they created the items in the same test, or
+  filter by data they own: a locator healed to `findElements(…).get(0)` on a shared list is not a fix. A
+  failing test must not make other tests fail.
+
+  ```java
+  // Bad, order-dependent: the drifted row locator healed to the first row of a list other tests fill too
+  WebElement row = driver.findElements(COMMENT_ROWS).get(0);
+
+  // Good, own data: the row that holds what this test created
+  WebElement row = driver.findElements(COMMENT_ROWS).stream()
+      .filter(r -> r.getText().contains(text)).findFirst().orElseThrow();
+  ```
 
 ## Procedure, for each SELECTOR_DRIFT item
 

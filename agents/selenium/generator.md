@@ -59,6 +59,33 @@ tests built on Page Object classes, and you check every locator against the runn
     Selenium Manager resolves the driver) and call `quit()` in `@AfterEach`.
 - **Independence.** No `@TestMethodOrder` or `@Order` dependencies, no shared mutable static state, and unique
   test data per test.
+- **Cleanup and isolation.** Every test that creates data (records, posts, comments, users where possible) must
+  register its cleanup immediately after creation, so it runs even if a later assertion fails: record the id
+  right after the create and delete it in `@AfterEach`, or wrap the test body in `try`/`finally`. Never rely on
+  the end of the test body for cleanup. Tests must not depend on counts, ordering or "first item" of shared
+  lists unless they created the items in the same test, or filter by data they own. A failing test must not
+  make other tests fail.
+
+  ```java
+  // Bad, leaves data behind: the delete at the end never runs after a failed assertion, and the assertion
+  // reads the first row of a list other tests fill too
+  String id = api.createComment(text);
+  assertEquals(text, driver.findElements(COMMENT_ROWS).get(0).getText());
+  api.deleteComment(id);
+
+  // Good, cleans up: the id is recorded right after the create and deleted in @AfterEach, even after a
+  // failure; the test waits for its own row
+  private final List<String> created = new ArrayList<>();
+
+  @AfterEach
+  void deleteCreated() { created.forEach(api::deleteComment); }
+
+  @Test
+  void showsANewComment() {
+      created.add(api.createComment(text));
+      wait.until(d -> d.findElements(COMMENT_ROWS).stream().anyMatch(row -> row.getText().contains(text)));
+  }
+  ```
 - **Base URL.** Read it from the existing config mechanism. If there is none, use
   `System.getProperty("baseUrl", System.getenv("APP_URL"))`. Never hard-code hosts.
 - **Traceability.** Annotate each test with its plan scenario, e.g. `@DisplayName("1. applies a valid coupon")`. If
@@ -69,6 +96,10 @@ tests built on Page Object classes, and you check every locator against the runn
   including what a user must *not* see and the checks of all parts after a change; don't merge or drop them
   because they repeat steps. If you find an actor or surface the plan judged not applicable but that exists in
   the app, say so under open questions in your summary instead of planning new tests yourself.
+- **Known behaviour.** If the spec has a section describing known, accepted or upstream behaviour (e.g. "Known
+  behaviour", "Known issues", "Out of scope"), tests must assert the documented actual behaviour, not the ideal.
+  The plan's "Known behaviour from the spec" table lists each item and the scenarios it affects: for those,
+  assert what the section documents, and record no possible bug.
 
 Example:
 
@@ -151,7 +182,8 @@ class CheckoutCouponTest extends BaseTest { // reuse the project's base class (d
       `mvn -B test -Dtest='<ClassName>' -Dsurefire.failIfNoSpecifiedTests=false`.
    4. **Fix** failures caused by the test (wrong locator, missing explicit wait, setup) and run it again. Make at
       most 5 attempts per scenario.
-   5. **Don't bend the test to the app.** If the app contradicts the spec:
+   5. **Don't bend the test to the app.** If the app contradicts the spec, and the spec's known-behaviour
+      section doesn't document the behaviour:
       - keep the assertion that reflects the spec;
       - record the scenario as `possible_bug` with evidence;
       - move on to the next scenario.

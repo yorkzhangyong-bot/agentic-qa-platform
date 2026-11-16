@@ -59,6 +59,31 @@ and you check every locator against the running app.
   ```
 - **Independence.** Every test creates its own state (fixtures, `test.beforeEach`, API calls through
   `request`). No `test.describe.serial`. Use unique test data per test.
+- **Cleanup and isolation.** Every test that creates data (records, posts, comments, users where possible) must
+  register its cleanup immediately after creation, so it runs even if a later assertion fails: a fixture whose
+  teardown deletes what it created (`use()`, then delete), or a per-test cleanup list that `test.afterEach`
+  drains, added to right after the create. Never rely on the end of the test body for cleanup. Tests must not
+  depend on counts, ordering or "first item" of shared lists unless they created the items in the same test, or
+  filter by data they own. A failing test must not make other tests fail.
+
+  ```ts
+  // Bad, leaves data behind: the delete at the end never runs after a failed assertion, and the assertion
+  // reads the first row of a list other tests fill too
+  const id = await createComment(request, text);
+  await expect(page.getByRole('row').first()).toContainText(text);
+  await request.delete(`/api/comments/${id}`);
+
+  // Good, cleans up: the id is recorded right after the create and deleted in afterEach, even after a
+  // failure; the test finds its own row
+  const created: string[] = [];
+  test.afterEach(async ({ request }) => {
+    for (const id of created.splice(0)) await request.delete(`/api/comments/${id}`);
+  });
+  test('1. shows a new comment', async ({ page, request }) => {
+    created.push(await createComment(request, text));
+    await expect(page.getByRole('row', { name: text })).toBeVisible();
+  });
+  ```
 - **Navigation.** Use relative URLs (`page.goto('/checkout')`) so `baseURL` applies. Never hard-code hosts.
 - **Traceability.** Name each test after its plan scenario, e.g. `test('1. applies a valid coupon', …)`. If the
   scenario carries Spec Kit ids (`FR-###`, `SC-###`), use the plan's suggested test name, which ends with them, and add
@@ -68,6 +93,10 @@ and you check every locator against the running app.
   including what a user must *not* see and the checks of all parts after a change; don't merge or drop them
   because they repeat steps. If you find an actor or surface the plan judged not applicable but that exists in
   the app, say so under open questions in your summary instead of planning new tests yourself.
+- **Known behaviour.** If the spec has a section describing known, accepted or upstream behaviour (e.g. "Known
+  behaviour", "Known issues", "Out of scope"), tests must assert the documented actual behaviour, not the ideal.
+  The plan's "Known behaviour from the spec" table lists each item and the scenarios it affects: for those,
+  assert what the section documents, and record no possible bug.
 
 Example:
 
@@ -129,7 +158,8 @@ test.describe('Checkout coupons', () => {
    3. **Run** only that spec: `npx playwright test <spec file> --reporter=line --retries=0`.
    4. **Fix** failures caused by the test (wrong locator, missing wait condition, setup) and run it again. Make
       at most 5 attempts per scenario.
-   5. **Don't bend the test to the app.** If the app contradicts the spec:
+   5. **Don't bend the test to the app.** If the app contradicts the spec, and the spec's known-behaviour
+      section doesn't document the behaviour:
       - keep the assertion that reflects the spec;
       - record the scenario as `possible_bug` with evidence;
       - move on to the next scenario.

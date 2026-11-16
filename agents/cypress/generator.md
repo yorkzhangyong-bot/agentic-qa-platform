@@ -58,6 +58,31 @@ check every selector against the running app.
   ```
 - **Independence.** Test isolation is on: set up state in `beforeEach` with `cy.request`, `cy.session`, fixtures or
   existing commands. Never depend on a previous `it`. Use unique test data per test.
+- **Cleanup and isolation.** Every test that creates data (records, posts, comments, users where possible) must
+  register its cleanup immediately after creation, so it runs even if a later assertion fails: record the id
+  right after the create and delete it in `afterEach` with `cy.request('DELETE', …)`. Never rely on the end of
+  the test body for cleanup. Tests must not depend on counts, ordering or "first item" of shared lists unless
+  they created the items in the same test, or filter by data they own. A failing test must not make other tests
+  fail.
+
+  ```ts
+  // Bad, leaves data behind: the delete at the end never runs after a failed assertion, and the assertion
+  // reads the first row of a list other tests fill too
+  cy.request('POST', '/api/comments', { text }).its('body.id').as('id');
+  cy.get('[data-cy="comment-row"]').first().should('contain', text);
+  cy.get('@id').then(id => cy.request('DELETE', `/api/comments/${id}`));
+
+  // Good, cleans up: the id is recorded right after the create and deleted in afterEach, even after a
+  // failure; the test finds its own row
+  const created: string[] = [];
+  afterEach(() => {
+    created.splice(0).forEach(id => cy.request('DELETE', `/api/comments/${id}`));
+  });
+  it('1. shows a new comment', () => {
+    cy.request('POST', '/api/comments', { text }).then(({ body }) => created.push(body.id));
+    cy.contains('[data-cy="comment-row"]', text).should('be.visible');
+  });
+  ```
 - **Navigation.** `cy.visit('/path')` with relative paths. The base URL comes from `baseUrl` or
   `CYPRESS_BASE_URL`; never hard-code hosts.
 - **Traceability.** Name each test after its plan scenario, e.g. `it('1. applies a valid coupon', …)`. If the
@@ -68,6 +93,10 @@ check every selector against the running app.
   including what a user must *not* see and the checks of all parts after a change; don't merge or drop them
   because they repeat steps. If you find an actor or surface the plan judged not applicable but that exists in
   the app, say so under open questions in your summary instead of planning new tests yourself.
+- **Known behaviour.** If the spec has a section describing known, accepted or upstream behaviour (e.g. "Known
+  behaviour", "Known issues", "Out of scope"), tests must assert the documented actual behaviour, not the ideal.
+  The plan's "Known behaviour from the spec" table lists each item and the scenarios it affects: for those,
+  assert what the section documents, and record no possible bug.
 
 Example:
 
@@ -106,7 +135,8 @@ describe('Checkout coupons', () => {
    3. **Run** only that spec: `npx cypress run --spec <spec file>`.
    4. **Fix** failures caused by the test (wrong selector, missing intercept or wait, setup) and run it again.
       Make at most 5 attempts per scenario.
-   5. **Don't bend the test to the app.** If the app contradicts the spec:
+   5. **Don't bend the test to the app.** If the app contradicts the spec, and the spec's known-behaviour
+      section doesn't document the behaviour:
       - keep the assertion that reflects the spec;
       - record the scenario as `possible_bug` with evidence;
       - move on to the next scenario.
