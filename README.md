@@ -92,6 +92,8 @@ test-and-heal.yml
   report-defects  report-defects.sh prepare → results/defect-candidates.json,
                   run-agent.sh defect-reporter → results/defects/<slug>.md,
                   report-defects.sh publish → a new issue, or a comment on the open one
+  verdict         (only with enable_verdict) verdict.sh → results/verdict.json + a summary; fails the run on
+                  REAL_BUG, ENV, or selector drift that wasn't healed and verified (FLAKY only with fail_on_flaky)
 
 generate-tests.yml
   config ──► generate: fetch-spec.sh → spec.md, stage-agents.sh
@@ -295,6 +297,8 @@ OpenCode's known gaps:
 | `report_defects` | no | `true` | Open a GitHub issue for each `REAL_BUG` failure, or comment on the open issue for it (see [Defect reporting](#defect-reporting)). |
 | `defect_labels` | no | `bug,agentic-qa` | Comma-separated labels for new defect issues. Missing labels are created; `agentic-qa` is always added, because open issues are found again by it. |
 | `defect_assignees` | no | `""` | Comma-separated GitHub logins to assign new defect issues to. If GitHub rejects them, the issue is opened unassigned and the summary says so. |
+| `enable_verdict` | no | `false` | Run the final `verdict` job, which fails the run on `REAL_BUG`, `ENV`, or selector drift that wasn't healed and verified. Off by default, so existing callers and the benchmark runner keep their behaviour. |
+| `fail_on_flaky` | no | `false` | With `enable_verdict`, also fail the run on `FLAKY` failures. |
 | `claude_code_version` | no | `"2.1.283"` | Version of `@anthropic-ai/claude-code` (engine `claude`). |
 | `opencode_version` | no | `"1.19.5"` | Version of `opencode-ai` (engine `opencode`). Unverified default; set it to the version you test with. |
 | `opencode_model` | no | `deepseek/deepseek-flash` | Model for the OpenCode agents, as `provider/model`. |
@@ -357,6 +361,12 @@ How it runs:
   - The job's timeout is 90 minutes.
 - **`report-defects`** runs alongside `heal`, only if `report_defects` is true and triage found `REAL_BUG` items. It
   gets `contents: read` and `issues: write`; see [Defect reporting](#defect-reporting).
+- **`verdict`** (opt-in with `enable_verdict`) runs last, only when the tests failed and triage succeeded. It reads
+  the `triage`, `auto-heal-results` and `defects` artifacts and, without any agent, fails the run on `REAL_BUG`,
+  `ENV` or selector drift that wasn't healed and verified (a drift item is healed when the healer marked it `healed`
+  and it no longer appears in the verification run's `verify-failures.json`); `FLAKY` fails only with `fail_on_flaky`.
+  Its summary lists every failing test with its classification and its issue or pull request link. It is off by
+  default so existing callers and the benchmark runner keep their run conclusions.
 - **Pull request.** If an open `auto-heal` PR already targets the same base branch, the run pushes its result to
   that PR's branch and comments on the PR. Otherwise it opens a new PR on `auto-heal/<run_id>`, titled
   "Auto-heal: repair failing tests", with the label `auto-heal`.

@@ -13,6 +13,7 @@ name: test-and-heal
 #
 #   config ──► test ──(failed)──► triage ──(SELECTOR_DRIFT)──► heal: healer → anti-cheat → pr-writer → PR
 #                                        └─(REAL_BUG)────────► report-defects: defect-reporter → issues
+#                                        └─(enable_verdict)──► verdict: fail the run on REAL_BUG, ENV or unhealed drift
 
 on:
   workflow_call:
@@ -81,6 +82,14 @@ on:
         description: Open a GitHub issue for each REAL_BUG failure, or comment on the open issue for it. The caller must grant issues write either way.
         type: boolean
         default: true
+      enable_verdict:
+        description: Run the final verdict job, which fails the run on REAL_BUG, ENV, or selector drift that wasn't healed and verified. Off by default, so existing callers keep their behaviour.
+        type: boolean
+        default: false
+      fail_on_flaky:
+        description: With enable_verdict, also fail the run on FLAKY failures.
+        type: boolean
+        default: false
       defect_labels:
         description: Comma-separated labels for new defect issues. Missing labels are created; agentic-qa is always added, because open issues are found again by it.
         type: string
@@ -1178,3 +1187,68 @@ jobs:
             results/defects-report.json
           if-no-files-found: ignore
           retention-days: 14
+
+  # The final gate, only when the caller opts in with enable_verdict. It reads the triage, heal and defect artifacts
+  # and fails the run on REAL_BUG, ENV or drift that was not healed and verified (FLAKY only with fail_on_flaky), with
+  # a summary listing every failing test and its issue or pull request link. No agent runs here.
+  verdict:
+    name: Verdict
+    needs: [config, test, triage, heal, report-defects]
+    if: >-
+      inputs.enable_verdict == true &&
+      needs.test.outputs.failed == 'true' &&
+      needs.triage.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      FRAMEWORK: ${{ inputs.framework }}
+      FAIL_ON_FLAKY: ${{ inputs.fail_on_flaky }}
+      PR_URL: ${{ needs.heal.outputs.pr_url }}
+      PLATFORM_DIR: .agentic-qa
+    steps:
+      - name: Checkout agentic-qa-platform
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ inputs.platform_ref || job.workflow_sha }}
+          token: ${{ secrets.PLATFORM_TOKEN || github.token }}
+          path: .agentic-qa
+          # Only what the jobs use at run time, never evals/, tests/, BACKLOG.md, README.md or .github/
+          # (tests/platform-checkout/check.py checks both). Not cone mode, which adds every top-level file.
+          sparse-checkout: |
+            /AGENT-RULES.md
+            /agents/
+            /frameworks/
+            /scripts/
+            /settings/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      # The triage artifact (results/triage.json + results/failures.json) is the verdict's input.
+      - name: Download triage results
+        uses: actions/download-artifact@v8
+        with:
+          name: triage
+          path: results
+
+      # The heal and defect artifacts may not exist (no drift, no real bug, report_defects false): their files are
+      # optional to the verdict. auto-heal-results is rooted at the workspace, so it restores into results/.
+      - name: Download heal results
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: auto-heal-results
+          path: .
+
+      - name: Download defect results
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: defects
+          path: results
+
+      # Fails the job (and the run) when anything blocks; writes results/verdict.json and the summary first.
+      - name: Verdict
+        run: bash "$PLATFORM_DIR/scripts/verdict.sh"

@@ -35,6 +35,8 @@ jobs:
       # engine: opencode    # default claude; opencode needs one of the provider keys below
       # report_defects: false             # default true: a GitHub issue per REAL_BUG failure
       # defect_assignees: your-github-login  # comma-separated logins for new defect issues
+      # enable_verdict: true              # default false: fail the run on REAL_BUG, ENV or unhealed drift
+      # fail_on_flaky: true               # with enable_verdict, also fail the run on FLAKY
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       # DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}

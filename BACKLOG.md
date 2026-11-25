@@ -3,7 +3,7 @@
 ## Platform backlog
 - [x] Start the consumer's app in the workflow jobs (app_start_command, scripts/app-server.sh): without APP_ENV for the agents, with it for the test runs; app_reset_command before every start; /proc denied on both engines as a second layer
 - [ ] Give the agents the app with its secrets when a consumer needs secret-dependent features during exploration: run the app as a separate OS user (sudo --preserve-env), so its environment is unreadable; needs passwordless sudo and a workspace the app can write to
-- [ ] Verdict job: fail the run on REAL_BUG, ENV, unhealed drift (optional fail_on_flaky)
+- [x] Verdict job: fail the run on REAL_BUG, ENV, unhealed drift (optional fail_on_flaky)
 - [ ] Requirement coverage report: FR/SC ids in test names vs spec
 - [x] Cache the Playwright browsers in jobs (keyed on OS, architecture and the exact Playwright version), with apt retried and a launch check when apt stays down
 - [ ] Cache node_modules in jobs
