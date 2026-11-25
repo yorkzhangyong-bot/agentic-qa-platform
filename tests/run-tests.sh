@@ -1141,6 +1141,127 @@ defects_publish
 check_texts missing-and-stray-reports "$transcript" "+**no report**" "+rogue.md" "-Not a candidate" "+\"missing\": ["
 
 echo
+echo "verdict.sh"
+vd="$work/verdict"
+verdict_setup() {  # verdict_setup: one failure of each kind: REAL_BUG, ENV, healed drift, flaky, unhealed drift
+  rm -rf "$vd"
+  mkdir -p "$vd/results"
+  cat > "$vd/results/failures.json" <<'JSON'
+[
+  {"name": "shows the order total", "classname": "checkout.spec.ts", "file": "tests/checkout.spec.ts"},
+  {"name": "rejects a wrong password", "classname": "login.spec.ts", "file": "tests/login.spec.ts"},
+  {"name": "applies a coupon", "classname": "checkout.spec.ts", "file": "tests/checkout.spec.ts"},
+  {"name": "home loads", "classname": "home.spec.ts", "file": "tests/home.spec.ts"},
+  {"name": "flaky save", "classname": "profile.spec.ts", "file": "tests/profile.spec.ts"}
+]
+JSON
+  cat > "$vd/results/triage.json" <<'JSON'
+{"items": [
+  {"name": "shows the order total", "classname": "checkout.spec.ts", "classification": "REAL_BUG", "reason": "wrong total"},
+  {"name": "rejects a wrong password", "classname": "login.spec.ts", "classification": "ENV", "reason": "no API key"},
+  {"name": "applies a coupon", "classname": "checkout.spec.ts", "classification": "SELECTOR_DRIFT", "reason": "test id moved"},
+  {"name": "home loads", "classname": "home.spec.ts", "classification": "FLAKY", "reason": "passed on rerun"},
+  {"name": "flaky save", "classname": "profile.spec.ts", "classification": "SELECTOR_DRIFT", "reason": "button renamed"}
+]}
+JSON
+  cat > "$vd/results/heal-report.json" <<'JSON'
+{"items": [
+  {"name": "applies a coupon", "status": "healed"},
+  {"name": "flaky save", "status": "not_healed"}
+]}
+JSON
+  printf '%s\n' '[]' > "$vd/results/verify-failures.json"
+  cat > "$vd/results/defects-report.json" <<'JSON'
+{"created": [{"test": "shows the order total", "number": 101, "url": "https://github.com/acme/shop/issues/101"}],
+ "updated": [], "failed": [], "missing": []}
+JSON
+}
+verdict_run() {  # verdict_run [VAR=value]...: run verdict.sh on $vd; sets $code
+  rm -f "$vd/results/verdict.json" "$vd/summary.md"
+  set +e
+  (cd "$vd" && env GITHUB_STEP_SUMMARY="$vd/summary.md" "$@" bash "$root/scripts/verdict.sh") \
+    > "$work/verdict.log" 2>&1
+  code=$?
+  set -e
+  { cat "$work/verdict.log" "$vd/summary.md" "$vd/results/verdict.json"; } > "$vd/all" 2> /dev/null || true
+}
+verdict_check() {  # verdict_check <name> <exit> <+present|-absent>...
+  local name="$1" want="$2" problems="" item
+  shift 2
+  [ "$code" -eq "$want" ] || problems+="exit $code (want $want)"$'\n'
+  for item in "$@"; do
+    if grep -qF -- "${item:1}" "$vd/all"; then
+      [ "${item:0:1}" = + ] || problems+="unexpected: ${item:1}"$'\n'
+    else
+      [ "${item:0:1}" = - ] || problems+="missing: ${item:1}"$'\n'
+    fi
+  done
+  if [ -z "$problems" ]; then ok "$name"; else bad "$name" "$problems$(cat "$vd/all")"; fi
+}
+verdict_setup
+verdict_run PR_URL=https://github.com/acme/shop/pull/55
+verdict_check verdict-fails-on-real-bug-env-and-unhealed-drift 1 \
+  "+::error title=Verdict::3 failure(s) are REAL_BUG, ENV or unhealed selector drift" \
+  "+The run **fails**" "+| shows the order total | tests/checkout.spec.ts | \`REAL_BUG\` | fail |" \
+  "+[#101](https://github.com/acme/shop/issues/101)" "+| rejects a wrong password | tests/login.spec.ts | \`ENV\` | fail |" \
+  "+| applies a coupon | tests/checkout.spec.ts | \`SELECTOR_DRIFT\` | healed and verified |" \
+  "+| flaky save | tests/profile.spec.ts | \`SELECTOR_DRIFT\` | fail | [heal PR](https://github.com/acme/shop/pull/55) |" \
+  "+| home loads | tests/home.spec.ts | \`FLAKY\` | allowed |" "+\"failed\": true" "+\"classification\": \"REAL_BUG\""
+# Nothing blocking: only FLAKY (allowed) and drift that was healed and verified.
+verdict_setup
+cat > "$vd/results/triage.json" <<'JSON'
+{"items": [
+  {"name": "home loads", "classname": "home.spec.ts", "classification": "FLAKY", "reason": "passed on rerun"},
+  {"name": "applies a coupon", "classname": "checkout.spec.ts", "classification": "SELECTOR_DRIFT", "reason": "test id moved"}
+]}
+JSON
+cat > "$vd/results/failures.json" <<'JSON'
+[
+  {"name": "home loads", "classname": "home.spec.ts", "file": "tests/home.spec.ts"},
+  {"name": "applies a coupon", "classname": "checkout.spec.ts", "file": "tests/checkout.spec.ts"}
+]
+JSON
+verdict_run PR_URL=https://github.com/acme/shop/pull/55
+verdict_check verdict-passes-when-nothing-blocks 0 \
+  "+The verdict passes" "+| home loads | tests/home.spec.ts | \`FLAKY\` | allowed |" \
+  "+| applies a coupon | tests/checkout.spec.ts | \`SELECTOR_DRIFT\` | healed and verified |" \
+  "+\"failed\": false" "-::error"
+# FLAKY blocks only when fail_on_flaky is set.
+verdict_run FAIL_ON_FLAKY=true PR_URL=https://github.com/acme/shop/pull/55
+verdict_check verdict-fails-on-flaky-with-fail-on-flaky 1 \
+  "+::error title=Verdict::1 failure(s)" "+| home loads | tests/home.spec.ts | \`FLAKY\` | fail |" "+\"fail_on_flaky\": true"
+# Drift healed, but the verification run still fails it: not verified, so it blocks.
+verdict_setup
+printf '%s\n' '[{"name": "applies a coupon", "classname": "checkout.spec.ts", "file": "tests/checkout.spec.ts"}]' \
+  > "$vd/results/verify-failures.json"
+verdict_run PR_URL=https://github.com/acme/shop/pull/55
+verdict_check verdict-fails-on-drift-healed-but-not-verified 1 \
+  "+| applies a coupon | tests/checkout.spec.ts | \`SELECTOR_DRIFT\` | fail | [heal PR](https://github.com/acme/shop/pull/55) |"
+# Only drift, all healed and verified: nothing blocks.
+verdict_setup
+cat > "$vd/results/triage.json" <<'JSON'
+{"items": [
+  {"name": "applies a coupon", "classname": "checkout.spec.ts", "classification": "SELECTOR_DRIFT", "reason": "test id moved"}
+]}
+JSON
+cat > "$vd/results/failures.json" <<'JSON'
+[
+  {"name": "applies a coupon", "classname": "checkout.spec.ts", "file": "tests/checkout.spec.ts"}
+]
+JSON
+cat > "$vd/results/heal-report.json" <<'JSON'
+{"items": [{"name": "applies a coupon", "status": "healed"}]}
+JSON
+verdict_run
+verdict_check verdict-passes-when-drift-is-healed-and-verified 0 \
+  "+The verdict passes" "+| applies a coupon | tests/checkout.spec.ts | \`SELECTOR_DRIFT\` | healed and verified |" "+\"failed\": false"
+# Without a triage file there is nothing to decide on: the verdict fails the run.
+verdict_setup
+rm "$vd/results/triage.json"
+verdict_run
+verdict_check verdict-fails-without-a-triage-file 1 "+does not exist or is not valid JSON"
+
+echo
 echo "load-app-env.sh"
 github_env="$work/github_env"
 app_env_out="$work/app-env.out"
